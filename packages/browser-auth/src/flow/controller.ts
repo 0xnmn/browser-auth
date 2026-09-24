@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { AccountSession } from "../credentials/accounts.js";
 import type { CredentialStore } from "../credentials/store.js";
@@ -115,14 +116,34 @@ export async function runFlow(
         page !== connection.page
           ? await abortable(openerSurface.observe(redactor), signal)
           : undefined;
-      const fingerprint = JSON.stringify({
-        origin: observation.origin,
-        text: observation.text,
-        elements: observation.elements.map(
-          ({ id: _id, ...element }) => element,
-        ),
-        opener: opener && { origin: opener.origin, text: opener.text },
-      });
+      const referencesById = new Map(
+        observation.elements.map((element, index) => [element.id, index]),
+      );
+      const fingerprint = createHash("sha256")
+        .update(
+          JSON.stringify({
+            origin: observation.origin,
+            text: observation.text,
+            elements: observation.elements.map(
+              ({ id: _id, ...element }) => element,
+            ),
+            // Captured ids change every observation. Normalize only tree refs,
+            // retaining their association with the ordered element metadata.
+            // The bounded tree may end inside a ref, which cannot be resolved.
+            tree: observation.tree.replace(
+              /"ref":"([^"]*)("|$)/g,
+              (match, id: string, closingQuote: string) =>
+                !closingQuote
+                  ? '"ref":null'
+                  : referencesById.has(id)
+                    ? `"ref":${referencesById.get(id)}`
+                    : match,
+            ),
+            screenshot: observation.screenshot,
+            opener: opener && { origin: opener.origin, text: opener.text },
+          }),
+        )
+        .digest("hex");
       if (externalWait?.fingerprint === fingerprint) {
         await flow.ask(
           { message: externalWait.message, fields: [], choices: [] },

@@ -433,42 +433,141 @@ it("exposes only filled state and retries reasoning without repeating credential
   expect(await page.locator("body").getAttribute("data-fills")).toBe("1");
 });
 
-it("polls unchanged external challenges without spending model steps", async () => {
-  const page = await shared.context.newPage();
-  await page.goto(site.url);
-  await page.setContent("<h1>Approve on your device</h1>");
-  let calls = 0;
-  let waits = 0;
-  const run = await complete(
-    createAuthWithAgent({
-      limits: { maxSteps: 2 },
-      agent: {
-        async next(observation) {
-          if (++calls === 1)
-            return {
-              kind: "ask_user",
-              message: "Approve on your device",
-              fields: [],
-              choices: [],
-              external: true,
-              submitElementId: null,
-            };
-          expect(observation.text).toContain("Signed in");
-          return { kind: "done", outcome: "authenticated" };
+it.each(["text", "tree", "screenshot"])(
+  "polls unchanged challenges and detects %s-only changes",
+  async (change) => {
+    const page = await shared.context.newPage();
+    await page.goto(site.url);
+    await page.setContent(
+      '<h1 aria-label="Waiting">Approve on your device</h1><button>Help</button>',
+    );
+    if (change === "text")
+      await page.locator("h1").evaluate((node) => {
+        node.style.position = "absolute";
+        node.style.top = "2000px";
+      });
+    let calls = 0;
+    let waits = 0;
+    let initialText = "";
+    let initialTree = "";
+    let initialScreenshot: string | undefined;
+    let initialId = "";
+    const run = await complete(
+      createAuthWithAgent({
+        limits: { maxSteps: 2 },
+        agent: {
+          async next(observation) {
+            if (++calls === 1) {
+              initialText = observation.text;
+              initialTree = observation.tree!;
+              initialScreenshot = observation.screenshot?.data;
+              initialId = observation.elements[0]!.id;
+              expect(initialScreenshot).toBeDefined();
+              return {
+                kind: "ask_user",
+                message: "Approve on your device",
+                fields: [],
+                choices: [],
+                external: true,
+                submitElementId: null,
+              };
+            }
+            expect(observation.elements[0]!.id).not.toBe(initialId);
+            if (change === "text")
+              expect(observation.text).toContain("Signed in");
+            else expect(observation.text).toBe(initialText);
+            if (change === "tree") {
+              expect(observation.tree).toContain('"name":"Approved"');
+              expect(observation.screenshot?.data).toBe(initialScreenshot);
+            }
+            if (change !== "tree") {
+              expect(
+                observation.tree!.replaceAll(
+                  observation.elements[0]!.id,
+                  initialId,
+                ),
+              ).toBe(initialTree);
+            }
+            if (change === "text")
+              expect(observation.screenshot?.data).toBe(initialScreenshot);
+            if (change === "screenshot") {
+              expect(observation.screenshot?.data).not.toBe(initialScreenshot);
+            }
+            return { kind: "done", outcome: "authenticated" };
+          },
         },
+      }).login({ ...authTarget(shared, page), save: "never" }),
+      async (interaction) => {
+        expect(interaction.pollAfterMs).toBe(1500);
+        expect(calls).toBe(1);
+        if (++waits === 3) {
+          await page.locator("h1").evaluate((node, change) => {
+            if (change === "text") node.textContent = "Signed in";
+            if (change === "tree") node.setAttribute("aria-label", "Approved");
+            if (change === "screenshot") node.style.color = "red";
+          }, change);
+        }
+        return null;
       },
-    }).login({ ...authTarget(shared, page), save: "never" }),
-    async (interaction) => {
-      expect(interaction.pollAfterMs).toBe(1500);
-      expect(calls).toBe(1);
-      if (++waits === 3) await page.setContent("<h1>Signed in</h1>");
-      return null;
-    },
-  );
-  expect(run.result.status).toBe("authenticated");
-  expect(calls).toBe(2);
-  expect(waits).toBe(3);
-});
+    );
+    expect(run.result.status).toBe("authenticated");
+    expect(calls).toBe(2);
+    expect(waits).toBe(3);
+  },
+);
+
+it.each([0, 1, 35, 36])(
+  "normalizes a tree truncated after %i ref characters",
+  async (length) => {
+    const page = await shared.context.newPage();
+    await page.goto(site.url);
+    await page.setContent("<button>Help</button>");
+    const observe = BrowserSurface.prototype.observe;
+    vi.spyOn(BrowserSurface.prototype, "observe").mockImplementation(
+      async function (this: BrowserSurface, redactor) {
+        const observation = await observe.call(this, redactor);
+        observation.tree =
+          " ".repeat(40_000 - 7 - length) +
+          '"ref":"' +
+          observation.elements[0]!.id.slice(0, length);
+        expect(observation.tree).toHaveLength(40_000);
+        return observation;
+      },
+    );
+    let calls = 0;
+    let waits = 0;
+    const run = await complete(
+      createAuthWithAgent({
+        limits: { maxSteps: 2 },
+        agent: {
+          async next() {
+            if (++calls === 1)
+              return {
+                kind: "ask_user",
+                message: "Waiting",
+                fields: [],
+                choices: [],
+                external: true,
+                submitElementId: null,
+              };
+            return { kind: "done", outcome: "authenticated" };
+          },
+        },
+      }).login({ ...authTarget(shared, page), save: "never" }),
+      async () => {
+        expect(calls).toBe(1);
+        if (++waits === 2)
+          await page.locator("button").evaluate((node) => {
+            node.textContent = "Approved";
+          });
+        return null;
+      },
+    );
+    expect(run.result.status).toBe("authenticated");
+    expect(waits).toBe(2);
+    expect(calls).toBe(2);
+  },
+);
 
 it("corrects invented references before any action or user prompt", async () => {
   const page = await shared.context.newPage();
