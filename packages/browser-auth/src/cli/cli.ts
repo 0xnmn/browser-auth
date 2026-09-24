@@ -107,7 +107,7 @@ const defaults: CliDependencies = {
 };
 
 function usage(): string {
-  return "Usage: browser-auth <login|logout|switch> [website-url] --config <module> [--input <file>] [--cdp <endpoint>] [--target-id <id>] [--account-id <id>] [--label <label>] [--save yes|ask|never] [--forget] [--json]\n       browser-auth accounts <list|remove> [id] --config <module> [--service-origin <origin>] [--credential-origin <origin>] [--json]";
+  return "Usage: browser-auth <login|logout|switch> [website-url] [--config <module>] [--input <file>] [--cdp <endpoint>] [--target-id <id>] [--account-id <id>] [--label <label>] [--save yes|ask|never] [--forget] [--json]\n       browser-auth accounts <list|remove> [id] [--config <module>] [--service-origin <origin>] [--credential-origin <origin>] [--json]\nDefaults: OpenAI gpt-6-luna (OPENAI_API_KEY), CDP http://127.0.0.1:9222, save ask.";
 }
 type Parsed =
   | {
@@ -158,8 +158,7 @@ function parse(argv: readonly string[]): Parsed {
       values.set(name, argv[++index]!);
     }
     if (values.has("--id")) id = values.get("--id");
-    if (!values.get("--config") || (action === "remove" && id === undefined))
-      throw new Error("usage");
+    if (action === "remove" && id === undefined) throw new Error("usage");
     return {
       command,
       action,
@@ -201,8 +200,7 @@ function parse(argv: readonly string[]): Parsed {
       throw new Error("usage");
     values.set(name, argv[++index]!);
   }
-  if (!values.get("--config") || values.get("--input") === "-")
-    throw new Error("usage");
+  if (values.get("--input") === "-") throw new Error("usage");
   const save = values.get("--save");
   if (save && !["yes", "ask", "never"].includes(save)) throw new Error("usage");
   if (!url && !values.get("--input")) throw new Error("usage");
@@ -496,8 +494,19 @@ export async function runCli(
     return 2;
   }
   try {
+    const config = args.values.get("--config");
     const client = deps.createClient(
-      await deps.loadConfig(args.values.get("--config")!),
+      config
+        ? await deps.loadConfig(config)
+        : {
+            model: {
+              provider: "openai",
+              model: "gpt-6-luna",
+              ...(deps.env.OPENAI_API_KEY
+                ? { apiKey: deps.env.OPENAI_API_KEY }
+                : {}),
+            },
+          },
     );
     if (args.command === "accounts") {
       if (args.action === "remove") {
@@ -560,8 +569,14 @@ export async function runCli(
         ? { forgetCredentials: true }
         : {}),
     };
-    if (!operation.cdpUrl && deps.env.BROWSER_AUTH_CDP_URL)
-      operation.cdpUrl = deps.env.BROWSER_AUTH_CDP_URL;
+    if (!operation.cdpUrl) {
+      operation.cdpUrl =
+        deps.env.BROWSER_AUTH_CDP_URL || "http://127.0.0.1:9222";
+      if (!deps.env.BROWSER_AUTH_CDP_URL)
+        deps.stderr.write(
+          "Using the default local CDP endpoint (port 9222).\n",
+        );
+    }
     const controller = new AbortController();
     operation.signal = controller.signal;
     validateOperationOptions(args.command, operation);
@@ -577,6 +592,13 @@ export async function runCli(
       const result = await (args.json
         ? renderJson(flow, deps, controller)
         : renderInteractive(flow, deps, controller));
+      if (
+        result.status === "failed" &&
+        result.error.code === "browser_connect_failed"
+      )
+        deps.stderr.write(
+          "Could not connect to Chrome. Start Chrome with --remote-debugging-port=9222 and a separate --user-data-dir, or set --cdp / BROWSER_AUTH_CDP_URL to an existing browser endpoint.\n",
+        );
       if (!args.json) deps.stdout.write(`${result.status}\n`);
       const failed =
         (result.status === "authenticated" &&

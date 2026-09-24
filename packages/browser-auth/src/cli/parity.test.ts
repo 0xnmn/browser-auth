@@ -132,6 +132,114 @@ it.each([
   },
 );
 
+it.each([
+  [undefined, undefined, undefined, "http://127.0.0.1:9222"],
+  [undefined, undefined, "http://env-browser", "http://env-browser"],
+  [
+    undefined,
+    "http://file-browser",
+    "http://env-browser",
+    "http://file-browser",
+  ],
+  [
+    "http://flag-browser",
+    "http://file-browser",
+    "http://env-browser",
+    "http://flag-browser",
+  ],
+] as const)(
+  "resolves CDP precedence for flag %s, file %s, env %s",
+  async (flag, file, env, expected) => {
+    const h = harness(undefined, file ? { cdpUrl: file } : {});
+    h.deps.env = env ? { BROWSER_AUTH_CDP_URL: env } : {};
+    h.channel.finish({
+      status: "authenticated",
+      save: { status: "not-saved" },
+    });
+    expect(
+      await runCli(
+        [
+          "login",
+          "https://site.example",
+          "--config",
+          "config.mjs",
+          "--input",
+          "input.json",
+          "--json",
+          ...(flag ? ["--cdp", flag] : []),
+        ],
+        h.deps,
+      ),
+    ).toBe(0);
+    expect(h.client.login).toHaveBeenCalledWith({
+      cdpUrl: expected,
+      url: "https://site.example",
+      signal: expect.any(AbortSignal),
+    });
+    expect(h.error()).not.toContain(expected);
+    expect(h.error().includes("default local CDP")).toBe(
+      !flag && !file && !env,
+    );
+  },
+);
+
+it.each([false, true])(
+  "uses default model and environment key unless configured (override %s)",
+  async (override) => {
+    const h = harness();
+    h.deps.env = { OPENAI_API_KEY: "synthetic-key" };
+    h.channel.finish({
+      status: "authenticated",
+      save: { status: "not-saved" },
+    });
+    expect(
+      await runCli(
+        [
+          "login",
+          "https://site.example",
+          "--json",
+          ...(override ? ["--config", "config.mjs"] : []),
+        ],
+        h.deps,
+      ),
+    ).toBe(0);
+    expect(h.deps.createClient).toHaveBeenCalledWith(
+      override
+        ? h.config
+        : {
+            model: {
+              provider: "openai",
+              model: "gpt-6-luna",
+              apiKey: "synthetic-key",
+            },
+          },
+    );
+    expect(h.deps.loadConfig).toHaveBeenCalledTimes(override ? 1 : 0);
+    expect(h.output() + h.error()).not.toContain("synthetic-key");
+  },
+);
+
+it("explains connection failures without polluting JSON output", async () => {
+  const h = harness();
+  h.deps.env = {};
+  h.channel.finish({
+    status: "failed",
+    error: { code: "browser_connect_failed", message: "Connection failed" },
+  });
+  expect(
+    await runCli(
+      ["login", "https://site.example", "--config", "config.mjs", "--json"],
+      h.deps,
+    ),
+  ).toBe(1);
+  expect(h.error()).toContain("--remote-debugging-port=9222");
+  expect(h.error()).toContain("--user-data-dir");
+  expect(JSON.parse(h.output())).toMatchObject({
+    status: "done",
+    result: { status: "failed" },
+  });
+});
+
 it("lists and removes accounts without CDP and preserves empty exact-origin filters", async () => {
   const h = harness();
   h.deps.env = {};
