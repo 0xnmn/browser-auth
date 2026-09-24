@@ -9,7 +9,7 @@ The Node process, caller, credential store, AI SDK provider implementation, UI h
 ## Implemented controls
 
 - Model inputs omit input values and known credential values are redacted from observed text/metadata. This is best-effort known-value filtering, **not a general DLP boundary**. Authenticated page text and identifiers can still reach the configured model/provider.
-- Models return schema-validated proposals rather than JavaScript, selectors, cookies, or network tools. Non-form clicks require user interaction. Native form submission must be associated with the observed fields.
+- Models return schema-validated proposals rather than JavaScript, selectors, cookies, or network tools. Routine authentication clicks execute automatically; the model is instructed to expose provider, account and method decisions as user choices. This classification is model-inferred, not a security boundary. Native form submission must be associated with the observed fields.
 - Credential destination consent uses exact HTTP(S) origins; non-loopback HTTP and URL userinfo are rejected. Saved service associations do not grant new credential-origin permission.
 - Captured element handles are revalidated before writes; stale navigation/control references fail instead of being rematched. This narrows races but cannot make a hostile, mutating DOM atomic.
 - Responses bind to a single-use interaction ID. Old responses are rejected. The only confirmations are controller-authored credential-use destination consent and credential-save consent. Page-provided text is still untrusted and can be socially misleading.

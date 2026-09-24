@@ -31,6 +31,72 @@ afterAll(async () => {
   await site?.close();
 });
 
+it.each(["navigation", "method-choice"] as const)(
+  "automates navigation but preserves intentional choices: %s",
+  async (mode) => {
+    const page = await shared.context.newPage();
+    await page.goto(`${site.url}/logout`);
+    const fixture = new FixtureAgent();
+    let choseMethod = false;
+    const run = await complete(
+      createAuth({
+        agent: {
+          async next(observation) {
+            if (observation.text.includes("Signed out")) {
+              const link = observation.elements.find(
+                (element) => element.label === "Sign in",
+              )!;
+              return mode === "navigation"
+                ? { kind: "click", elementId: link.id }
+                : {
+                    kind: "form",
+                    fields: [],
+                    submitElementId: null,
+                    choices: [
+                      {
+                        elementId: link.id,
+                        label: "Use password",
+                        back: false,
+                      },
+                    ],
+                  };
+            }
+            return fixture.next(observation);
+          },
+        },
+      }).login({
+        ...authTarget(shared, page),
+        credentials: { username: "alice", password: fixturePassword },
+        save: "ask",
+      }),
+      async (interaction) => {
+        if (interaction.kind === "form") {
+          expect(mode).toBe("method-choice");
+          expect(interaction.choices).toHaveLength(1);
+          expect(interaction.choices[0]?.label).toBe("Use password");
+          expect(await page.locator("h1").innerText()).toBe("Signed out");
+          choseMethod = true;
+        } else {
+          expect(interaction.kind).toBe("confirm");
+        }
+        return defaultResponse(interaction);
+      },
+    );
+    expect(run.result.status).toBe("authenticated");
+    expect(await page.locator("body").innerText()).toContain(
+      "Signed in as alice",
+    );
+    expect(choseMethod).toBe(mode === "method-choice");
+    expect(
+      run.snapshots.flatMap((snapshot) =>
+        snapshot.status === "waiting" && snapshot.interaction.kind === "confirm"
+          ? [snapshot.interaction.confirmation.kind]
+          : [],
+      ),
+    ).toEqual(["use-credentials", "save-credentials"]);
+  },
+);
+
 it("uses one login flow for native session actions", async () => {
   const context = shared.context;
   const page = await context.newPage();

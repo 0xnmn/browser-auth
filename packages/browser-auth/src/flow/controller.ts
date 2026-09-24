@@ -287,21 +287,9 @@ export async function runFlow(
             "invalid_reference",
             "The agent selected an unknown control",
           );
-        const answer = await flow.ask(
-          {
-            kind: "form",
-            message: "Continue with this website action?",
-            fields: [],
-            choices: [{ id: element.id, label: element.label || "Continue" }],
-          },
-          signal,
-        );
-        signal.throwIfAborted();
-        if (answer?.kind === "choose") {
-          await surface.click(answer.choiceId, signal);
-          afterBack = false;
-          history.push(`Clicked ${redactor.text(element.label)}`);
-        }
+        await surface.click(element.id, signal);
+        afterBack = false;
+        history.push(`Clicked ${redactor.text(element.label)}`);
       } else if (proposal.kind === "external") {
         const answer = await flow.ask(
           {
