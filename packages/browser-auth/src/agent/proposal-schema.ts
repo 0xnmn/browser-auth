@@ -10,6 +10,22 @@ const proposedChoice = z
   .strict();
 
 export const proposalSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("session"),
+      choices: z
+        .array(
+          z
+            .object({
+              elementId: reference,
+              label: z.string().max(160),
+              kind: z.enum(["logout", "switch", "add", "accounts"]),
+            })
+            .strict(),
+        )
+        .max(20),
+    })
+    .strict(),
   z.object({ kind: z.literal("click"), elementId: reference }).strict(),
   z
     .object({
@@ -44,6 +60,8 @@ export const proposalSchema = z.discriminatedUnion("kind", [
       outcome: z.enum([
         "authenticated",
         "signed-out",
+        "account-changed",
+        "not-signed-in",
         "unsupported",
         "rejected",
       ]),

@@ -15,6 +15,9 @@ export async function startAuthSite() {
         .filter(Boolean)
         .map((part) => part.split("=")),
     );
+    const signedAccounts = decodeURIComponent(
+      cookies.signedAccounts ?? cookies.account ?? "alice",
+    );
     const html = (body: string) => {
       res.setHeader("content-type", "text/html");
       res.end(
@@ -27,21 +30,51 @@ export async function startAuthSite() {
     };
     const dashboard = (switched = false) =>
       html(
-        `<h1>${switched ? "Switched" : "Dashboard"}</h1><p>Signed in as ${cookies.account ?? "alice"}</p><a href="/logout">Sign out</a><a href="/accounts">Switch account</a>`,
+        `<h1>${switched ? "Switched" : "Dashboard"}</h1><p>Signed in as ${cookies.account ?? "alice"}</p><p>Signed accounts: ${signedAccounts}</p><a href="/logout">Sign out</a><a href="/accounts">Switch account</a><a href="/add-account">Add account</a>`,
       );
     if (url.pathname === "/logout") {
       res.setHeader("set-cookie", "account=; Max-Age=0; Path=/; HttpOnly");
       html("<h1>Signed out</h1><a href='/'>Sign in</a>");
     } else if (url.pathname === "/accounts") {
       html(
-        "<h1>Choose account</h1><a href='/switch?to=alice'>Personal Alice</a><a href='/switch?to=bob'>Work Bob</a>",
+        "<h1>Choose account</h1><a href='/switch?to=alice'>Personal Alice</a><a href='/switch?to=bob'>Work Bob</a><a href='/add-account'>Add another account</a><a href='/logout'>Sign out</a>",
       );
     } else if (url.pathname === "/switch") {
       const account = url.searchParams.get("to") === "bob" ? "bob" : "alice";
       res.setHeader("set-cookie", `account=${account}; Path=/; HttpOnly`);
       redirect("/switched");
     } else if (url.pathname === "/switched") dashboard(true);
-    else if (url.pathname === "/frame") {
+    else if (url.pathname === "/add-account") {
+      html(
+        "<h1>Add another account</h1><p>Current account remains signed in</p><form method='post' action='/add-session'><label>Username<input name='username' autocomplete='username'></label><label>Password<input name='password' type='password' autocomplete='current-password'></label><button type='submit'>Add account</button></form><a href='/accounts'>Back</a>",
+      );
+    } else if (url.pathname === "/add-session" && req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      const fields = new URLSearchParams(body);
+      const username = fields.get("username") ?? "alice";
+      const password = fields.get("password") ?? "";
+      submissions.push({ username, password });
+      if (password !== fixturePassword)
+        return html("<h1>Rejected credentials</h1>");
+      res.setHeader("set-cookie", [
+        `account=${username === "bob" ? "bob" : "alice"}; Path=/; HttpOnly`,
+        `signedAccounts=${encodeURIComponent(
+          Array.from(
+            new Set([...signedAccounts.split(",").filter(Boolean), username]),
+          ).join(","),
+        )}; Path=/; HttpOnly`,
+      ]);
+      redirect("/added");
+    } else if (url.pathname === "/added") {
+      html(
+        `<h1>Added account</h1><p>Signed in as ${cookies.account}</p><p>Signed accounts: ${signedAccounts}</p><a href='/accounts'>Switch account</a>`,
+      );
+    } else if (url.pathname === "/unsupported") {
+      html(
+        "<h1>Dashboard</h1><p>Signed in as alice</p><a href='/logout'>Sign out</a>",
+      );
+    } else if (url.pathname === "/frame") {
       const origin = url.searchParams.get("origin");
       html(
         `<h1>Service sign in</h1><iframe title="Identity provider" src="${origin}" width="500" height="500"></iframe>`,

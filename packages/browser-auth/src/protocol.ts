@@ -14,6 +14,7 @@ export type SaveOutcome =
   | { status: "not-saved" }
   | { status: "failed"; error: AuthError };
 export type AuthResult =
+  | { status: "already-signed-in" }
   | {
       status: "authenticated";
       accountId?: string | undefined;
@@ -48,13 +49,17 @@ export interface AuthField {
   required: boolean;
 }
 export type AuthConfirmation =
-  | { kind: "use-credentials"; origin: string }
-  | { kind: "save-credentials" | "confirm-sign-out" }
-  | {
-      kind: "confirm-sign-in" | "confirm-account-switch";
-      accountLabel?: string | undefined;
-    };
+  { kind: "use-credentials"; origin: string } | { kind: "save-credentials" };
 export type AuthInteraction =
+  | {
+      id: string;
+      kind: "session";
+      choices: Array<{
+        id: string;
+        label: string;
+        kind: "finish" | "logout" | "switch" | "add" | "accounts";
+      }>;
+    }
   | {
       id: string;
       kind: "form";

@@ -31,7 +31,7 @@ afterAll(async () => {
   await site?.close();
 });
 
-it("logs in with partial inputs, saves, offers stored accounts, switches and logs out with forgetting", async () => {
+it("uses one login flow for native session actions", async () => {
   const context = shared.context;
   const page = await context.newPage();
   await page.goto(site.url);
@@ -58,12 +58,7 @@ it("logs in with partial inputs, saves, offers stored accounts, switches and log
   expect(JSON.stringify(agent.observations)).not.toContain(fixturePassword);
   expect(JSON.stringify(first.snapshots)).not.toContain(fixturePassword);
 
-  expect(
-    (await complete(auth.logout(authTarget(shared, page)))).result.status,
-  ).toBe("signed-out");
-  expect(await store.list()).toHaveLength(1);
-  await page.goto(site.url);
-  const second = await complete(
+  const added = await complete(
     auth.login({
       ...authTarget(shared, page),
       credentials: { username: "bob", password: fixturePassword },
@@ -71,34 +66,68 @@ it("logs in with partial inputs, saves, offers stored accounts, switches and log
       save: "yes",
     }),
     (interaction) => {
-      const newAccount = interaction.choices.find(
-        (choice) => choice.id === "new",
+      const add = interaction.choices.find((choice) => choice.kind === "add");
+      if (add) {
+        expect(interaction.choices.map((choice) => choice.label)).toEqual(
+          expect.arrayContaining(["Sign out", "Switch account", "Add account"]),
+        );
+      }
+      return add
+        ? { kind: "choose", interactionId: interaction.id, choiceId: add.id }
+        : interaction.kind === "form" &&
+            interaction.message === "Choose a saved login"
+          ? { kind: "choose", interactionId: interaction.id, choiceId: "new" }
+          : defaultResponse(interaction);
+    },
+  );
+  expect(added.result).toMatchObject({
+    status: "authenticated",
+    accountId: expect.any(String),
+    save: { status: "saved" },
+  });
+  expect(await page.locator("body").innerText()).toContain(
+    "Signed accounts: alice,bob",
+  );
+  expect(await store.list()).toHaveLength(2);
+  await page.goto(`${site.url}/accounts`);
+  expect(await page.locator("body").innerText()).toContain("Personal Alice");
+  expect(await page.locator("body").innerText()).toContain("Work Bob");
+  await page.goto(site.url);
+
+  const switched = await complete(
+    auth.login({ ...authTarget(shared, page) }),
+    (interaction) => {
+      const accounts = interaction.choices.find(
+        (choice) => choice.kind === "accounts",
       );
-      return newAccount
-        ? {
-            kind: "choose",
-            interactionId: interaction.id,
-            choiceId: newAccount.id,
-          }
+      const alice = interaction.choices.find(
+        (choice) => choice.label === "Personal Alice",
+      );
+      const choice = alice ?? accounts;
+      return choice
+        ? { kind: "choose", interactionId: interaction.id, choiceId: choice.id }
         : defaultResponse(interaction);
     },
   );
-  expect(second.result.status).toBe("authenticated");
-  expect(await store.list()).toHaveLength(2);
-
-  const switched = await complete(
-    auth.switchAccount({ ...authTarget(shared, page), accountId: alice.id }),
-  );
   expect(switched.result.status).toBe("authenticated");
+  expect(switched.result).not.toHaveProperty("accountId");
   expect(await page.locator("body").innerText()).toContain(
     "Signed in as alice",
   );
   const logout = await complete(
-    auth.logout({
+    auth.login({
       ...authTarget(shared, page),
       accountId: alice.id,
       forgetCredentials: true,
     }),
+    (interaction) => {
+      const logout = interaction.choices.find(
+        (choice) => choice.kind === "logout",
+      );
+      return logout
+        ? { kind: "choose", interactionId: interaction.id, choiceId: logout.id }
+        : defaultResponse(interaction);
+    },
   );
   expect(logout.result).toMatchObject({
     status: "signed-out",
@@ -124,7 +153,7 @@ it("logs in with partial inputs, saves, offers stored accounts, switches and log
   await context.close();
 });
 
-it("does not save supplied credentials when already signed in or when rejected", async () => {
+it("finishes an existing session without mutation or credential reads", async () => {
   const context = shared.context;
   await context.addCookies([
     { name: "account", value: "alice", url: site.url },
@@ -132,7 +161,21 @@ it("does not save supplied credentials when already signed in or when rejected",
   const page = await context.newPage();
   await page.goto(site.url);
   const store = new InMemoryStore();
-  const auth = createAuth({ agent: new FixtureAgent(), store });
+  let reads = 0;
+  const originalList = store.list.bind(store);
+  const originalGet = store.get.bind(store);
+  store.list = async (...args) => {
+    reads++;
+    return originalList(...args);
+  };
+  store.get = async (...args) => {
+    reads++;
+    return originalGet(...args);
+  };
+  const auth = createAuth({
+    agent: new FixtureAgent(),
+    store,
+  });
   const already = await complete(
     auth.login({
       ...authTarget(shared, page),
@@ -140,15 +183,24 @@ it("does not save supplied credentials when already signed in or when rejected",
       save: "yes",
     }),
   );
-  expect(already.result).toEqual({
-    status: "authenticated",
-    save: { status: "not-saved" },
-  });
-  expect(await store.list()).toEqual([]);
+  expect(already.result).toEqual({ status: "already-signed-in" });
+  expect(
+    already.snapshots.some(
+      (snapshot) =>
+        snapshot.status === "waiting" &&
+        snapshot.interaction.kind === "session" &&
+        snapshot.interaction.choices.some((choice) => choice.kind === "finish"),
+    ),
+  ).toBe(true);
+  expect(await page.locator("body").innerText()).toContain(
+    "Signed in as alice",
+  );
+  expect(reads).toBe(0);
+  expect(await originalList()).toEqual([]);
   await context.clearCookies();
   await page.goto(site.url);
   const rejected = await complete(
-    auth.login({
+    createAuth({ agent: new FixtureAgent(), store }).login({
       ...authTarget(shared, page),
       credentials: { username: "alice", password: "wrong-fixture-value" },
       save: "yes",
@@ -162,7 +214,7 @@ it("does not save supplied credentials when already signed in or when rejected",
   await context.close();
 });
 
-it("does not claim the requested account when a different native account is selected", async () => {
+it("selects a native existing account from the same flow", async () => {
   const context = shared.context;
   const page = await context.newPage();
   await context.addCookies([
@@ -178,35 +230,237 @@ it("does not claim the requested account when a different native account is sele
     credentials: [],
   });
   const auth = createAuth({ agent: new FixtureAgent(), store });
-  let checkedIdentity = false;
   const run = await complete(
-    auth.switchAccount({ ...authTarget(shared, page), accountId: "alice" }),
+    auth.login({ ...authTarget(shared, page) }),
     (interaction) => {
-      if (
-        interaction.kind === "confirm" &&
-        interaction.confirmation.kind === "confirm-account-switch"
-      ) {
-        expect(interaction.confirmation.accountLabel).toBe("Personal Alice");
-        checkedIdentity = true;
-        return {
-          kind: "choose",
-          interactionId: interaction.id,
-          choiceId: "no",
-        };
-      }
+      const accounts = interaction.choices.find(
+        (choice) => choice.kind === "accounts",
+      );
       const bob = interaction.choices.find(
         (choice) => choice.label === "Work Bob",
       );
-      return bob
-        ? { kind: "choose", interactionId: interaction.id, choiceId: bob.id }
+      const choice = bob ?? accounts;
+      return choice
+        ? { kind: "choose", interactionId: interaction.id, choiceId: choice.id }
         : defaultResponse(interaction);
     },
   );
-  expect(checkedIdentity).toBe(true);
   expect(await page.locator("body").innerText()).toContain("Signed in as bob");
-  expect(run.result.status).toBe("unknown");
+  expect(run.result.status).toBe("authenticated");
   expect(run.result).not.toHaveProperty("accountId");
   await context.close();
+});
+
+it("does not invent missing website session capabilities", async () => {
+  const context = shared.context;
+  await context.addCookies([
+    { name: "account", value: "alice", url: site.url },
+  ]);
+  const page = await context.newPage();
+  await page.goto(`${site.url}/unsupported`);
+  const before = site.submissions.length;
+  const run = await complete(
+    createAuth({ agent: new FixtureAgent() }).login(authTarget(shared, page)),
+    (interaction) => {
+      expect(interaction.kind).toBe("session");
+      expect(interaction.choices.map((choice) => choice.kind)).toEqual([
+        "finish",
+        "logout",
+      ]);
+      return defaultResponse(interaction);
+    },
+  );
+  expect(run.result).toEqual({ status: "already-signed-in" });
+  expect(await page.locator("body").innerText()).toContain(
+    "Signed in as alice",
+  );
+  expect(site.submissions).toHaveLength(before);
+  await context.close();
+});
+
+it.each(["logout", "finish", "reload", "replace"])(
+  "rejects stale session choice %s",
+  async (change) => {
+    const context = shared.context;
+    await context.addCookies([
+      { name: "account", value: "alice", url: site.url },
+    ]);
+    const page = await context.newPage();
+    await page.goto(site.url);
+    const flow = createAuth({
+      agent:
+        change === "logout"
+          ? new FixtureAgent()
+          : { next: async () => ({ kind: "session", choices: [] }) },
+    }).login(authTarget(shared, page));
+    const iterator = flow.updates()[Symbol.asyncIterator]();
+    let snapshot = await iterator.next();
+    while (!snapshot.done && snapshot.value.status !== "waiting")
+      snapshot = await iterator.next();
+    expect(snapshot.done).toBe(false);
+    if (snapshot.done || snapshot.value.status !== "waiting")
+      throw new Error("missing interaction");
+    const interaction = snapshot.value.interaction;
+    const selected = interaction.choices.find(
+      (choice) => choice.kind === (change === "logout" ? "logout" : "finish"),
+    )!;
+    if (change === "reload") await page.reload();
+    else if (change === "replace") await page.setContent("<h1>Signed out</h1>");
+    else await page.goto(`${site.url}/unsupported`);
+    await flow.respond({
+      kind: "choose",
+      interactionId: interaction.id,
+      choiceId: selected.id,
+    });
+    expect(await flow.result).toMatchObject({
+      status: "failed",
+      error: { code: "stale_page" },
+    });
+    expect(
+      (await context.cookies()).find((cookie) => cookie.name === "account")
+        ?.value,
+    ).toBe("alice");
+    await iterator.return?.();
+    await context.close();
+  },
+);
+
+it.each(["completion", "credentials", "logout"])(
+  "keeps menu discovery separate from %s",
+  async (next) => {
+    const page = await shared.context.newPage();
+    await shared.context.addCookies([
+      { name: "account", value: "alice", url: site.url },
+    ]);
+    await page.goto(site.url);
+    const store = new InMemoryStore();
+    let reads = 0;
+    store.list = async () => {
+      reads++;
+      return [];
+    };
+    const agent = new FixtureAgent();
+    const run = await complete(
+      createAuth({
+        store,
+        agent: {
+          async next(observation) {
+            if (observation.text.includes("Choose account")) {
+              if (next === "completion")
+                return { kind: "done", outcome: "account-changed" };
+              if (next === "credentials")
+                return {
+                  kind: "form",
+                  fields: [
+                    {
+                      elementId: "fake",
+                      key: "password",
+                      label: "Password",
+                      type: "password",
+                      rejected: false,
+                    },
+                  ],
+                  choices: [],
+                  submitElementId: null,
+                };
+              return {
+                kind: "session",
+                choices: [
+                  {
+                    elementId: observation.elements.find(
+                      (element) => element.label === "Sign out",
+                    )!.id,
+                    label: "Sign out",
+                    kind: "logout",
+                  },
+                ],
+              };
+            }
+            return agent.next(observation);
+          },
+        },
+      }).login(authTarget(shared, page)),
+      (interaction) => {
+        const selected =
+          interaction.choices.find((choice) => choice.kind === "accounts") ??
+          interaction.choices.find((choice) => choice.kind === "logout");
+        return selected
+          ? {
+              kind: "choose",
+              interactionId: interaction.id,
+              choiceId: selected.id,
+            }
+          : defaultResponse(interaction);
+      },
+    );
+    expect(run.result).toMatchObject(
+      next === "completion"
+        ? { status: "unknown" }
+        : next === "credentials"
+          ? { status: "failed", error: { code: "unsupported" } }
+          : { status: "signed-out" },
+    );
+    expect(reads).toBe(0);
+    expect(
+      (await shared.context.cookies()).find(
+        (cookie) => cookie.name === "account",
+      )?.value,
+    ).toBe(next === "logout" ? undefined : "alice");
+  },
+);
+
+it("does not complete account addition after Back", async () => {
+  const page = await shared.context.newPage();
+  await shared.context.addCookies([
+    { name: "account", value: "alice", url: site.url },
+  ]);
+  await page.goto(site.url);
+  const agent = new FixtureAgent();
+  const before = site.submissions.length;
+  const run = await complete(
+    createAuth({
+      agent: {
+        async next(observation) {
+          if (observation.text.includes("Choose account"))
+            return { kind: "done", outcome: "account-changed" };
+          if (observation.text.includes("Add another account"))
+            return {
+              kind: "form",
+              fields: [],
+              submitElementId: null,
+              choices: [
+                {
+                  elementId: observation.elements.find(
+                    (element) => element.label === "Back",
+                  )!.id,
+                  label: "Back",
+                  back: true,
+                },
+              ],
+            };
+          return agent.next(observation);
+        },
+      },
+    }).login(authTarget(shared, page)),
+    (interaction) => {
+      const selected = interaction.choices.find(
+        (choice) => choice.kind === "add" || choice.kind === "back",
+      );
+      return selected
+        ? {
+            kind: "choose",
+            interactionId: interaction.id,
+            choiceId: selected.id,
+          }
+        : defaultResponse(interaction);
+    },
+  );
+  expect(run.result.status).toBe("unknown");
+  expect(site.submissions).toHaveLength(before);
+  expect(
+    (await shared.context.cookies()).find((cookie) => cookie.name === "account")
+      ?.value,
+  ).toBe("alice");
 });
 
 it("supports multi-step input, website Back and manual OTP without storing the code", async () => {

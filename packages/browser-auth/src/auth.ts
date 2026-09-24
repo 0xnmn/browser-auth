@@ -3,12 +3,7 @@ import { InMemoryStore } from "./credentials/memory-store.js";
 import { FlowChannel } from "./flow/interaction.js";
 import { runFlow } from "./flow/controller.js";
 import type { AuthFlow } from "./protocol.js";
-import type {
-  AuthOptions,
-  LoginOptions,
-  LogoutOptions,
-  SwitchOptions,
-} from "./types.js";
+import type { AuthOptions, LoginOptions } from "./types.js";
 import type { StoreQuery } from "./credentials/store.js";
 import { validateOperationOptions } from "./options.js";
 import type { AuthAgent } from "./agent/proposals.js";
@@ -32,18 +27,15 @@ export function createAuthWithAgent(
   const store = options.store ?? new InMemoryStore();
   let busy = false;
 
-  function start(
-    operation: "login" | "logout" | "switch",
-    input: LoginOptions | LogoutOptions | SwitchOptions,
-  ): AuthFlow {
+  function start(input: LoginOptions): AuthFlow {
     if (busy) throw new Error("This auth client already has an active flow");
-    validateOperationOptions(operation, input);
+    validateOperationOptions(input);
     const flow = new FlowChannel();
     busy = true;
     void flow.result.then(() => {
       busy = false;
     });
-    void runFlow(operation, input, options, agent, store, flow).catch(() => {
+    void runFlow(input, options, agent, store, flow).catch(() => {
       flow.finish({
         status: "failed",
         error: {
@@ -56,9 +48,7 @@ export function createAuthWithAgent(
   }
 
   return {
-    login: (input: LoginOptions) => start("login", input),
-    logout: (input: LogoutOptions) => start("logout", input),
-    switchAccount: (input: SwitchOptions) => start("switch", input),
+    login: start,
     accounts: {
       list: (query?: StoreQuery) => store.list(query),
       remove: (id: string) => store.delete(id),

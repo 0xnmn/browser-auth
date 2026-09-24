@@ -16,6 +16,12 @@ interface Reference {
 /** Handles are captured per observation, never rematched by selector after a prompt. */
 export class BrowserSurface {
   private readonly references = new Map<string, Reference>();
+  private readonly documents: Array<{
+    root: ElementHandle;
+    frame: Frame;
+    url: string;
+    text: string;
+  }> = [];
 
   constructor(
     readonly page: Page,
@@ -27,6 +33,11 @@ export class BrowserSurface {
     const refs = [...this.references.values()];
     this.references.clear();
     await Promise.all(refs.map((ref) => ref.element.dispose().catch(() => {})));
+    await Promise.all(
+      this.documents
+        .splice(0)
+        .map(({ root }) => root.dispose().catch(() => {})),
+    );
   }
 
   async observe(
@@ -46,6 +57,14 @@ export class BrowserSurface {
         .locator("body")
         .innerText({ timeout: this.timeout })
         .catch(() => "");
+      const root = await frame.locator("html").elementHandle();
+      if (root)
+        this.documents.push({
+          root,
+          frame,
+          url: frame.url(),
+          text: text.slice(0, 6000),
+        });
       texts.push(redactor.text(text).slice(0, 6000));
       const handles = await frame
         .locator("input, button, a, [role=button], select")
@@ -99,6 +118,35 @@ export class BrowserSurface {
       text: texts.join("\n").slice(0, 12000),
       elements,
     };
+  }
+
+  /** Session decisions must not rely on an obsolete document or visible state. */
+  async validateSession(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    for (const { root, frame, url, text } of this.documents) {
+      const current =
+        frame.url() === url &&
+        !frame.isDetached() &&
+        (await root
+          .evaluate(
+            (node, previousText) =>
+              node === document.documentElement &&
+              document.body.innerText.slice(0, 6000) === previousText,
+            text,
+          )
+          .catch(() => false));
+      if (!current)
+        throw new AuthFailure(
+          "stale_page",
+          "The page changed; start a new authentication attempt",
+        );
+    }
+    if (!this.documents.length)
+      throw new AuthFailure(
+        "stale_page",
+        "The session observation is no longer available",
+      );
+    signal.throwIfAborted();
   }
 
   async validate(id: string, signal: AbortSignal): Promise<Reference> {

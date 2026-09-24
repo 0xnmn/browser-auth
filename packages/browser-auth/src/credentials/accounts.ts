@@ -106,7 +106,10 @@ export class AccountSession {
     ];
   }
 
-  async fill(proposal: FormProposal, surface: BrowserSurface): Promise<void> {
+  async fill(
+    proposal: FormProposal,
+    surface: BrowserSurface,
+  ): Promise<{ message: string; back: boolean }> {
     if (
       new Set(proposal.fields.map((field) => field.elementId)).size !==
       proposal.fields.length
@@ -169,7 +172,11 @@ export class AccountSession {
       this.signal.throwIfAborted();
       if (answer?.kind === "choose" && answer.choiceId !== "use-credentials") {
         await surface.click(answer.choiceId, this.signal);
-        return;
+        const choice = choices.find((choice) => choice.id === answer.choiceId)!;
+        return {
+          message: `Selected ${choice.label}`,
+          back: choice.kind === "back",
+        };
       }
       if (missing.length && answer?.kind !== "submit")
         throw new AuthFailure(
@@ -231,6 +238,7 @@ export class AccountSession {
     }
     if (proposal.submitElementId)
       await surface.click(proposal.submitElementId, this.signal);
+    return { message: "Entered credentials in an observed form", back: false };
   }
 
   async save(
@@ -240,7 +248,6 @@ export class AccountSession {
     const result: Extract<AuthResult, { status: "authenticated" }> = {
       status: "authenticated",
       save: { status: "not-saved" },
-      ...(this.selected ? { accountId: this.selected.id } : {}),
     };
     if (mode === "never" || this.submitted.size === 0) return result;
     if (

@@ -13,6 +13,7 @@ export const saveOutcomeSchema = z.discriminatedUnion("status", [
 ]);
 
 export const authResultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("already-signed-in") }),
   z.object({
     status: z.literal("authenticated"),
     accountId: z.string().optional(),
@@ -58,6 +59,21 @@ export const interactionSchema = z.discriminatedUnion("kind", [
   z
     .object({
       id: z.string(),
+      kind: z.literal("session"),
+      choices: z.array(
+        z
+          .object({
+            id: z.string(),
+            label: z.string(),
+            kind: z.enum(["finish", "logout", "switch", "add", "accounts"]),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+  z
+    .object({
+      id: z.string(),
       kind: z.literal("form"),
       message: z.string().optional(),
       fields: z.array(fieldSchema),
@@ -81,19 +97,6 @@ export const interactionSchema = z.discriminatedUnion("kind", [
           .object({ kind: z.literal("use-credentials"), origin: z.string() })
           .strict(),
         z.object({ kind: z.literal("save-credentials") }).strict(),
-        z
-          .object({
-            kind: z.literal("confirm-sign-in"),
-            accountLabel: z.string().optional(),
-          })
-          .strict(),
-        z.object({ kind: z.literal("confirm-sign-out") }).strict(),
-        z
-          .object({
-            kind: z.literal("confirm-account-switch"),
-            accountLabel: z.string().optional(),
-          })
-          .strict(),
       ]),
       choices: z.array(choiceSchema),
     })

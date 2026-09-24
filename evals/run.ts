@@ -50,21 +50,7 @@ async function run() {
           : createAuthWithAgent({ agent: new FixtureAgent(), ...common });
         const run = await complete(
           auth.login({ ...authTarget(browser, page), save: "yes" }),
-          async (interaction) => {
-            if (
-              interaction.kind === "confirm" &&
-              interaction.confirmation.kind === "confirm-sign-in" &&
-              !(await page.locator("body").innerText()).includes(
-                "Signed in as alice",
-              )
-            )
-              return {
-                kind: "choose",
-                interactionId: interaction.id,
-                choiceId: "no",
-              };
-            return defaultResponse(interaction);
-          },
+          defaultResponse,
         );
         const payload = JSON.stringify(run.snapshots);
         const pass =

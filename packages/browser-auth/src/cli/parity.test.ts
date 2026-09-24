@@ -6,7 +6,7 @@ import { expect, it, vi } from "vitest";
 import { createAuth } from "../auth.js";
 import { InMemoryStore } from "../credentials/memory-store.js";
 import { FlowChannel } from "../flow/interaction.js";
-import type { LoginOptions, LogoutOptions, SwitchOptions } from "../types.js";
+import type { LoginOptions } from "../types.js";
 import { runCli, loadInput, type CliDependencies } from "./cli.js";
 
 function harness(channel = new FlowChannel(), initial: unknown = {}) {
@@ -18,7 +18,7 @@ function harness(channel = new FlowChannel(), initial: unknown = {}) {
     store: new InMemoryStore(),
     limits: { maxSteps: 7 },
   };
-  const start = (input: LoginOptions | LogoutOptions | SwitchOptions) => {
+  const start = (input: LoginOptions) => {
     input.signal!.addEventListener(
       "abort",
       () => channel.finish({ status: "cancelled" }),
@@ -28,8 +28,6 @@ function harness(channel = new FlowChannel(), initial: unknown = {}) {
   };
   const client = {
     login: vi.fn(start),
-    logout: vi.fn(start),
-    switchAccount: vi.fn(start),
     accounts: createAuth(config).accounts,
   };
   const deps: Partial<CliDependencies> = {
@@ -62,75 +60,93 @@ function harness(channel = new FlowChannel(), initial: unknown = {}) {
   };
 }
 
-it.each([
-  [
-    "login",
-    "login",
-    {
-      credentials: { phone: "+15551234567", fields: { tenant: "north" } },
-      save: "yes",
-      label: "Personal",
-      accountId: "old",
-    },
-    ["--save", "never", "--account-id", "new"],
-    {
-      save: "never",
-      accountId: "new",
-      label: "Personal",
-      credentials: { phone: "+15551234567", fields: { tenant: "north" } },
-    },
-  ],
-  [
-    "logout",
-    "logout",
-    { accountId: "keep", forgetCredentials: false },
-    [],
-    { accountId: "keep", forgetCredentials: false },
-  ],
-  ["switch", "switchAccount", { accountId: "work" }, [], { accountId: "work" }],
-] as const)(
-  "forwards every %s option through the same SDK contract",
-  async (command, method, options, flags, expected) => {
-    const file = {
-      cdpUrl: "http://file-browser",
-      url: "https://file.example",
-      targetId: "tab-file",
-      cdpHeaders: { Authorization: "private-header" },
-      ...options,
-    };
-    const h = harness(undefined, file);
-    h.channel.finish({
-      status: "authenticated",
-      save: { status: "not-saved" },
-    });
-    expect(
-      await runCli(
-        [
-          command,
-          "https://flag.example",
-          "--config",
-          "config.mjs",
-          "--input",
-          "private.json",
-          "--target-id",
-          "tab-flag",
-          "--json",
-          ...flags,
-        ],
-        h.deps,
-      ),
-    ).toBe(0);
-    expect(h.client[method]).toHaveBeenCalledWith({
-      ...file,
-      ...expected,
-      url: "https://flag.example",
-      targetId: "tab-flag",
-      signal: expect.any(AbortSignal),
-    });
-    expect(h.deps.createClient).toHaveBeenCalledWith(h.config);
-    expect(h.output()).not.toContain("private-header");
-  },
-);
+it("forwards login options without an action", async () => {
+  const file = {
+    cdpUrl: "http://file-browser",
+    url: "https://file.example",
+    targetId: "tab-file",
+    cdpHeaders: { Authorization: "private-header" },
+    credentials: { phone: "+15551234567", fields: { tenant: "north" } },
+    save: "yes",
+    label: "Personal",
+    accountId: "old",
+  };
+  const h = harness(undefined, file);
+  h.channel.finish({ status: "authenticated", save: { status: "not-saved" } });
+  expect(
+    await runCli(
+      [
+        "login",
+        "https://flag.example",
+        "--config",
+        "config.mjs",
+        "--input",
+        "private.json",
+        "--target-id",
+        "tab-flag",
+        "--save",
+        "never",
+        "--account-id",
+        "new",
+        "--json",
+      ],
+      h.deps,
+    ),
+  ).toBe(0);
+  expect(h.client.login).toHaveBeenCalledWith({
+    ...file,
+    save: "never",
+    accountId: "new",
+    url: "https://flag.example",
+    targetId: "tab-flag",
+    signal: expect.any(AbortSignal),
+  });
+  expect(h.client.login.mock.calls[0]![0]).not.toHaveProperty("action");
+  expect(h.output()).not.toContain("private-header");
+});
+
+it("forwards forget with an account ID for a potential logout choice", async () => {
+  const h = harness();
+  h.channel.finish({ status: "signed-out", deletion: "deleted" });
+  expect(
+    await runCli(
+      [
+        "login",
+        "https://site.example",
+        "--account-id",
+        "work",
+        "--forget",
+        "--json",
+      ],
+      h.deps,
+    ),
+  ).toBe(0);
+  expect(h.client.login).toHaveBeenCalledWith(
+    expect.objectContaining({ accountId: "work", forgetCredentials: true }),
+  );
+});
+
+it("rejects an action supplied through runtime input", async () => {
+  const h = harness(undefined, { action: "logout", accountId: "work" });
+  expect(
+    await runCli(
+      ["login", "https://service.example", "--input", "input.json", "--json"],
+      h.deps,
+    ),
+  ).toBe(1);
+  expect(h.client.login).not.toHaveBeenCalled();
+});
+
+it("requires an account ID with --forget", async () => {
+  const h = harness();
+  expect(
+    await runCli(
+      ["login", "https://service.example", "--forget", "--json"],
+      h.deps,
+    ),
+  ).toBe(1);
+  expect(h.client.login).not.toHaveBeenCalled();
+});
 
 it.each([
   [undefined, undefined, undefined, "http://127.0.0.1:9222"],
@@ -425,6 +441,33 @@ it("roundtrips JSONL responses with split UTF-8, rejects replay, and never echoe
   });
   expect(h.stdin.listenerCount("data")).toBe(0);
   expect(h.stdin.isPaused()).toBe(true);
+});
+
+it("roundtrips a JSON session choice without implicitly finishing", async () => {
+  const h = harness();
+  const response = h.channel.ask(
+    {
+      kind: "session",
+      choices: [
+        { id: "finish-current", label: "Continue", kind: "finish" },
+        { id: "website-switch", label: "Choose another", kind: "switch" },
+      ],
+    },
+    new AbortController().signal,
+  );
+  const run = runCli(jsonArgs, h.deps);
+  await vi.waitFor(() => expect(h.output()).toContain('"kind":"session"'));
+  const waiting = JSON.parse(h.output().trim());
+  const choice = {
+    kind: "choose" as const,
+    interactionId: waiting.interaction.id,
+    choiceId: "website-switch",
+  };
+  h.stdin.write(`${JSON.stringify(choice)}\n`);
+  expect(await response).toEqual(choice);
+  expect(h.client.login).toHaveBeenCalledTimes(1);
+  h.channel.finish({ status: "authenticated", save: { status: "not-saved" } });
+  expect(await run).toBe(0);
 });
 
 it.each(["cancel", "invalid", "oversized", "eof", "error"])(

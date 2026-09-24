@@ -4,6 +4,14 @@ export interface ProposedChoice {
   back: boolean;
 }
 export type AuthProposal =
+  | {
+      kind: "session";
+      choices: Array<{
+        elementId: string;
+        label: string;
+        kind: "logout" | "switch" | "add" | "accounts";
+      }>;
+    }
   | { kind: "click"; elementId: string }
   | {
       kind: "form";
@@ -20,7 +28,13 @@ export type AuthProposal =
   | { kind: "external"; message: string; choices: ProposedChoice[] }
   | {
       kind: "done";
-      outcome: "authenticated" | "signed-out" | "unsupported" | "rejected";
+      outcome:
+        | "authenticated"
+        | "signed-out"
+        | "account-changed"
+        | "unsupported"
+        | "not-signed-in"
+        | "rejected";
     }
   | { kind: "wait" };
 export type FormProposal = Extract<AuthProposal, { kind: "form" }>;
@@ -35,7 +49,9 @@ export interface ObservedElement {
 }
 
 export interface AuthObservation {
-  operation: "login" | "logout" | "switch";
+  operation: "login" | "logout" | "choose-account";
+  /** Completed actions, never credential values. */
+  history?: string[];
   origin: string;
   text: string;
   elements: ObservedElement[];

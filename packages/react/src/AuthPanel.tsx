@@ -16,6 +16,13 @@ const inputType = (type: "text" | "email" | "phone" | "password" | "code") =>
   type === "phone" ? "tel" : type === "code" ? "text" : type;
 
 function Result({ result }: { result: AuthResult }) {
+  if (result.status === "already-signed-in")
+    return (
+      <>
+        <h2>Already signed in</h2>
+        <p>The browser has an existing signed-in session.</p>
+      </>
+    );
   if (result.status === "authenticated") {
     const save =
       result.save.status === "saved"
@@ -89,25 +96,7 @@ function Confirmation({
         <strong className="browser-auth__origin">{confirmation.origin}</strong>?
       </p>
     );
-  if (
-    (confirmation.kind === "confirm-sign-in" ||
-      confirmation.kind === "confirm-account-switch") &&
-    confirmation.accountLabel
-  )
-    return (
-      <p>
-        Is the browser now signed in as{" "}
-        <strong>{confirmation.accountLabel}</strong>? Verify the account on the
-        website before confirming.
-      </p>
-    );
-  const labels = {
-    "save-credentials": "Save these credentials for later?",
-    "confirm-sign-in": "Is the browser now signed in?",
-    "confirm-sign-out": "Is the browser now signed out?",
-    "confirm-account-switch": "Did the browser switch to the intended account?",
-  } as const;
-  return <p>{labels[confirmation.kind]}</p>;
+  return <p>Save these credentials for later?</p>;
 }
 
 function Interaction({
@@ -172,6 +161,12 @@ function Interaction({
 
   return (
     <>
+      {interaction.kind === "session" && (
+        <>
+          <h2>Already signed in</h2>
+          <p>Choose how to continue with this browser session.</p>
+        </>
+      )}
       {interaction.kind === "external" && (
         <>
           <h2>Waiting for confirmation</h2>

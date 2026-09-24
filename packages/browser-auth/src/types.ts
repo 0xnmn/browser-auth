@@ -48,17 +48,11 @@ export interface AuthOptions {
 }
 
 export type LoginOptions = AuthTarget & {
+  signal?: AbortSignal;
   credentials?: Credentials;
-  accountId?: string;
   label?: string;
   save?: "yes" | "ask" | "never";
-  signal?: AbortSignal;
-};
-export type SwitchOptions = AuthTarget & {
-  accountId: string;
-  signal?: AbortSignal;
-};
-export type LogoutOptions = AuthTarget & { signal?: AbortSignal } & (
+} & (
     | { forgetCredentials: true; accountId: string }
     | { forgetCredentials?: false; accountId?: string }
   );

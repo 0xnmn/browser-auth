@@ -14,8 +14,6 @@ export type {
   AuthTarget,
   ModelConfig,
   LoginOptions,
-  LogoutOptions,
-  SwitchOptions,
 } from "./types.js";
 export type {
   AuthFlow,

@@ -50,12 +50,28 @@ it("renders only valid account choices, clears submitted secrets, and permits Ba
     expect(await form.getByLabel("Response count").innerText()).toBe(
       "1 responses",
     );
-    const identity = page.getByRole("article", {
-      name: "Account confirmation",
+    const existing = page.getByRole("article", {
+      name: "Existing session",
       exact: true,
     });
-    expect(await identity.innerText()).toContain(
-      "Is the browser now signed in as Work account?",
+    expect(await existing.innerText()).toContain("Already signed in");
+    expect(await existing.getByRole("button").count()).toBe(0);
+    const native = page.getByRole("article", {
+      name: "Website account choices",
+      exact: true,
+    });
+    expect(await native.getByRole("button").allTextContents()).toEqual([
+      "Personal Alice",
+      "Work Bob",
+      "Add another account",
+      "Log out",
+      "Keep this session and finish",
+    ]);
+    await native
+      .getByRole("button", { name: "Add another account", exact: true })
+      .click();
+    expect(await native.getByLabel("Response count").innerText()).toBe(
+      "1 responses",
     );
   } finally {
     await browser.close();

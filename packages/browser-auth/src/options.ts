@@ -23,34 +23,22 @@ const credentials = z
     fields: headers.optional(),
   })
   .strict();
-const schemas = {
-  login: z
-    .object({
-      ...target,
-      credentials: credentials.optional(),
-      accountId: z.string().min(1).optional(),
-      label: z.string().min(1).optional(),
-      save: z.enum(["yes", "ask", "never"]).optional(),
-    })
-    .strict(),
-  switch: z.object({ ...target, accountId: z.string().min(1) }).strict(),
-  logout: z
-    .object({
-      ...target,
-      accountId: z.string().min(1).optional(),
-      forgetCredentials: z.boolean().optional(),
-    })
-    .strict()
-    .refine((value) => !value.forgetCredentials || Boolean(value.accountId)),
-};
+const schema = z
+  .object({
+    ...target,
+    credentials: credentials.optional(),
+    accountId: z.string().min(1).optional(),
+    label: z.string().min(1).optional(),
+    save: z.enum(["yes", "ask", "never"]).optional(),
+    forgetCredentials: z.boolean().optional(),
+  })
+  .strict()
+  .refine((value) => !value.forgetCredentials || Boolean(value.accountId));
 
 /** Validate public operation input without exposing the runtime schemas. */
-export function validateOperationOptions(
-  operation: "login" | "logout" | "switch",
-  value: unknown,
-): void {
-  const parsed = schemas[operation].safeParse(value);
-  if (!parsed.success) throw new Error(`invalid_${operation}_options`);
+export function validateOperationOptions(value: unknown): void {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new Error("invalid_login_options");
   try {
     originOf(parsed.data.url);
   } catch {

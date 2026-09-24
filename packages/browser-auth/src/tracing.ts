@@ -2,11 +2,13 @@ import type { AuthResult } from "./protocol.js";
 
 export interface AuthTrace {
   step(index: number): void;
-  action(kind: "click" | "form" | "external" | "done" | "wait"): void;
+  action(
+    kind: "click" | "form" | "external" | "done" | "wait" | "session",
+  ): void;
   end(result: AuthResult["status"]): void;
 }
 export interface AuthTracer {
-  startFlow(operation: "login" | "logout" | "switch"): AuthTrace;
+  startFlow(operation: "login" | "logout" | "choose-account"): AuthTrace;
 }
 export interface OtlpOptions {
   url: string;

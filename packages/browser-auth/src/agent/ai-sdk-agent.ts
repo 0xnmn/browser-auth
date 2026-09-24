@@ -30,10 +30,16 @@ Include a visible submit button in submitElementId. Do not invent selectors or I
 Offer SSO, account pickers, MFA choices and website Back controls as choices, not autonomous account selection.
 Use click only for unambiguous navigation such as opening the login page or requested current-session logout.
 Never click 'log out everywhere', delete-account, enrollment or recovery actions.
-During switch, show all native account choices to the user. Do not log out or fill credentials to simulate switching.
+For login, if visible evidence shows an existing signed-in session before authentication, propose session, not done. Its choices must reference observed native controls: logout for current-session logout, switch for a specific available account, add for add-another-account, or accounts for opening the website's account menu. Offer all supported choices together. Do not invent unavailable controls; an empty choices array is valid. The controller always adds a finish choice. Do not ask the user to verify the signed-in state.
+After credential login completes, return authenticated instead of reopening session choices.
+For choose-account, discover the website's native account controls. Use session proposals for all newly discovered session actions, including nested logout, existing accounts and add another account. Opening a menu does not select an account. Use form/external choices with back=true for website Back controls. Do not preselect switching versus adding or invent unavailable choices.
+Only offer credential fields after the user enters the website's native add-account flow. Never log out or replace the existing session as a fallback.
+For choose-account, if visibly signed out before any action, return not-signed-in. If native controls cannot be found, return unsupported; if still uncertain, wait rather than guess.
+Use history to distinguish the original session from completion: return account-changed only after a native account selection/addition and subsequent visible evidence of completion. Merely opening a menu, going Back or remaining signed in is not success. After going Back to the original session, propose session again.
+For logout, return signed-out if already signed out; otherwise use only current-session logout.
 Use external for a human approval, CAPTCHA, passkey or magic link. The controller will check again.
 Use done only with visible evidence for the requested operation; a login form disappearing alone is insufficient.
-Use unsupported if the requested native switch/logout/auth method cannot be completed.
+Use unsupported if the requested native account/logout/auth method cannot be completed.
 You never see secret values. The controller handles destination approval, credential filling, confirmation and storage.`;
 
 export function createModelAgent(config: ModelConfig): AuthAgent {

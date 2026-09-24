@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { Page } from "playwright-core";
-import { AccountSession, confirm } from "../credentials/accounts.js";
+import { AccountSession } from "../credentials/accounts.js";
 import type { CredentialStore } from "../credentials/store.js";
 import { BrowserSurface } from "../browser/observation.js";
 import { connectTarget } from "../browser/connection.js";
@@ -8,24 +8,19 @@ import type { BrowserConnection } from "../browser/connection.js";
 import { AuthFailure, abortable } from "../errors.js";
 import { Redactor } from "../security/redaction.js";
 import { proposalSchema } from "../agent/proposal-schema.js";
-import type { AuthAgent } from "../agent/proposals.js";
-import type {
-  AuthOptions,
-  LoginOptions,
-  LogoutOptions,
-  SwitchOptions,
-} from "../types.js";
-import type { AuthInteraction, AuthResult } from "../protocol.js";
+import type { AuthAgent, AuthProposal } from "../agent/proposals.js";
+import type { AuthOptions, LoginOptions } from "../types.js";
+import type { AuthResult } from "../protocol.js";
 import { FlowChannel } from "./interaction.js";
 
 export async function runFlow(
-  operation: "login" | "logout" | "switch",
-  input: LoginOptions | LogoutOptions | SwitchOptions,
+  input: LoginOptions,
   options: Omit<AuthOptions, "model">,
   agent: AuthAgent,
   store: CredentialStore,
   flow: FlowChannel,
 ): Promise<void> {
+  let operation: "login" | "logout" | "choose-account" = "login";
   const deadline = AbortSignal.timeout(options.limits?.timeoutMs ?? 180_000);
   const signal = input.signal
     ? AbortSignal.any([input.signal, deadline])
@@ -51,23 +46,23 @@ export async function runFlow(
   let result: AuthResult;
   let phase = "browser_connect";
   let writeAttempted = false;
-  let confirmedLogin:
+  let accountAction: "switch" | "add" | undefined;
+  const history: string[] = [];
+  let accountsInitialized = false;
+  let completedLogin:
     Extract<AuthResult, { status: "authenticated" }> | undefined;
   try {
     connection = await connectTarget(input, flow, signal, timeout);
     currentPage = connection.page;
     watch(currentPage);
-    const login = input as LoginOptions;
     const accounts = new AccountSession(
       store,
       flow,
       redactor,
       signal,
       connection.serviceOrigin,
-      login.credentials,
+      "credentials" in input ? input.credentials : undefined,
     );
-    phase = "store_load";
-    if (operation !== "logout") await accounts.initialize(input.accountId);
     for (let step = 0; step < (options.limits?.maxSteps ?? 30); step++) {
       signal.throwIfAborted();
       span?.step(step);
@@ -92,6 +87,7 @@ export async function runFlow(
           {
             ...observation,
             operation,
+            history,
             availableCredentialKeys: accounts.keys(),
           },
           { signal },
@@ -104,74 +100,144 @@ export async function runFlow(
           "invalid_proposal",
           "The agent returned an invalid action",
         );
-      const proposal = parsed.data;
+      const proposal: AuthProposal =
+        parsed.data.kind === "done" &&
+        parsed.data.outcome === "authenticated" &&
+        operation === "login" &&
+        !writeAttempted
+          ? { kind: "session" as const, choices: [] }
+          : parsed.data;
       span?.action(proposal.kind);
       signal.throwIfAborted();
+      if (proposal.kind === "session") {
+        const ids = proposal.choices.map((choice) => choice.elementId);
+        if (new Set(ids).size !== ids.length || ids.includes("finish"))
+          throw new AuthFailure(
+            "invalid_proposal",
+            "The agent returned duplicate session choices",
+          );
+        for (const choice of proposal.choices)
+          await surface.validate(choice.elementId, signal);
+        const answer = await flow.ask(
+          {
+            kind: "session",
+            choices: [
+              {
+                id: "finish",
+                label: "Keep this session and finish",
+                kind: "finish",
+              },
+              ...proposal.choices.map((choice) => ({
+                id: choice.elementId,
+                label: redactor.text(choice.label),
+                kind: choice.kind,
+              })),
+            ],
+          },
+          signal,
+        );
+        signal.throwIfAborted();
+        if (answer?.kind !== "choose")
+          throw new AuthFailure(
+            "invalid_response",
+            "No session choice was received",
+          );
+        await surface.validateSession(signal);
+        if (answer.choiceId === "finish") {
+          result = { status: "already-signed-in" };
+          break;
+        }
+        const choice: Extract<
+          AuthProposal,
+          { kind: "session" }
+        >["choices"][number] = proposal.choices.find(
+          (entry) => entry.elementId === answer.choiceId,
+        )!;
+        // The existing page reference is revalidated before any selected action.
+        await surface.validate(choice.elementId, signal);
+        operation = choice.kind === "logout" ? "logout" : "choose-account";
+        accountAction =
+          choice.kind === "switch" || choice.kind === "add"
+            ? choice.kind
+            : undefined;
+        phase = "browser_action";
+        await surface.click(choice.elementId, signal);
+        history.push(`Selected ${choice.kind}: ${redactor.text(choice.label)}`);
+        await delay(150, undefined, { signal });
+        continue;
+      }
       if (proposal.kind === "done") {
         if (
           proposal.outcome === "unsupported" ||
-          proposal.outcome === "rejected"
+          proposal.outcome === "rejected" ||
+          proposal.outcome === "not-signed-in"
         )
           throw new AuthFailure(
             proposal.outcome,
             proposal.outcome === "unsupported"
               ? "This authentication action is not supported by the current website flow"
-              : "The website rejected authentication",
+              : proposal.outcome === "not-signed-in"
+                ? "A signed-in session is required to choose another account. Log in first."
+                : "The website rejected authentication",
           );
         const expected =
-          operation === "logout" ? "signed-out" : "authenticated";
+          operation === "logout"
+            ? "signed-out"
+            : operation === "choose-account"
+              ? "account-changed"
+              : "authenticated";
+        if (
+          operation === "choose-account" &&
+          (!accountAction || proposal.outcome === "authenticated")
+        ) {
+          result = {
+            status: "unknown",
+            message: "The requested account change was not observed",
+          };
+          break;
+        }
         if (proposal.outcome !== expected)
           throw new AuthFailure(
             "invalid_outcome",
             "The agent returned an outcome for a different operation",
           );
-        const kind =
-          operation === "logout"
-            ? "confirm-sign-out"
-            : operation === "switch"
-              ? "confirm-account-switch"
-              : "confirm-sign-in";
-        const confirmation: Extract<
-          AuthInteraction,
-          { kind: "confirm" }
-        >["confirmation"] =
-          kind === "confirm-sign-out"
-            ? { kind }
-            : {
-                kind,
-                ...(accounts.selected
-                  ? { accountLabel: accounts.selected.label }
-                  : {}),
-              };
-        if (!(await confirm(flow, confirmation, signal))) {
-          result = {
-            status: "unknown",
-            message: "Authentication outcome was not confirmed",
-          };
-        } else if (operation === "logout")
+        if (operation === "logout")
           result = { status: "signed-out", deletion: "not-requested" };
         else {
-          confirmedLogin = {
+          completedLogin = {
             status: "authenticated",
             save: { status: "not-saved" },
-            ...(accounts.selected ? { accountId: accounts.selected.id } : {}),
           };
           phase = "store_save";
           result = await accounts.save(
-            operation === "login" ? (login.save ?? "ask") : "never",
-            login.label,
+            "save" in input ? (input.save ?? "ask") : "ask",
+            "label" in input ? input.label : undefined,
           );
         }
         break;
       }
       phase = "browser_action";
       if (proposal.kind === "form") {
-        if (operation !== "login" && proposal.fields.length)
+        if (
+          proposal.fields.length &&
+          (operation === "logout" ||
+            (operation === "choose-account" && accountAction !== "add"))
+        )
           throw new AuthFailure(
             "unsupported",
-            "Account switching and logout cannot fall back to credential login",
+            "Enter a native account flow before using credentials; logout cannot fall back to login",
           );
-        await accounts.fill(proposal, surface);
+        if (proposal.fields.length && !accountsInitialized) {
+          phase = "store_load";
+          await accounts.initialize(
+            "accountId" in input ? input.accountId : undefined,
+          );
+          accountsInitialized = true;
+          phase = "browser_action";
+        }
+        const filled = await accounts.fill(proposal, surface);
+        history.push(filled.message);
+        if (filled.back) accountAction = undefined;
       } else if (proposal.kind === "click") {
         const element = observation.elements.find(
           (entry) => entry.id === proposal.elementId,
@@ -191,8 +257,10 @@ export async function runFlow(
           signal,
         );
         signal.throwIfAborted();
-        if (answer?.kind === "choose")
+        if (answer?.kind === "choose") {
           await surface.click(answer.choiceId, signal);
+          history.push(`Clicked ${redactor.text(element.label)}`);
+        }
       } else if (proposal.kind === "external") {
         const answer = await flow.ask(
           {
@@ -208,8 +276,16 @@ export async function runFlow(
           1500,
         );
         signal.throwIfAborted();
-        if (answer?.kind === "choose")
+        if (answer?.kind === "choose") {
           await surface.click(answer.choiceId, signal);
+          if (
+            proposal.choices.find(
+              (choice) => choice.elementId === answer.choiceId,
+            )?.back
+          )
+            accountAction = undefined;
+          history.push("Selected an external-flow choice");
+        }
       }
       await delay(150, undefined, { signal });
     }
@@ -218,7 +294,7 @@ export async function runFlow(
       message: "The authentication step limit was reached",
     };
   } catch (error) {
-    if (confirmedLogin) result = confirmedLogin;
+    if (completedLogin) result = completedLogin;
     else if (input.signal?.aborted && !writeAttempted)
       result = { status: "cancelled" };
     else if (input.signal?.aborted)
@@ -256,7 +332,8 @@ export async function runFlow(
     "forgetCredentials" in input &&
     input.forgetCredentials &&
     result.status !== "cancelled" &&
-    result.status !== "authenticated"
+    result.status !== "authenticated" &&
+    result.status !== "already-signed-in"
   ) {
     try {
       await store.delete(input.accountId);

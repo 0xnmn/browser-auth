@@ -12,12 +12,7 @@ import type {
   AuthResponse,
   AuthResult,
 } from "../protocol.js";
-import type {
-  AuthOptions,
-  LoginOptions,
-  LogoutOptions,
-  SwitchOptions,
-} from "../types.js";
+import type { AuthOptions, LoginOptions } from "../types.js";
 import { validateOperationOptions } from "../options.js";
 
 const MAX_INPUT = 256 * 1024;
@@ -107,11 +102,11 @@ const defaults: CliDependencies = {
 };
 
 function usage(): string {
-  return "Usage: browser-auth <login|logout|switch> [website-url] [--config <module>] [--input <file>] [--cdp <endpoint>] [--target-id <id>] [--account-id <id>] [--label <label>] [--save yes|ask|never] [--forget] [--json]\n       browser-auth accounts <list|remove> [id] [--config <module>] [--service-origin <origin>] [--credential-origin <origin>] [--json]\nDefaults: OpenAI gpt-6-luna (OPENAI_API_KEY), CDP http://127.0.0.1:9222, save ask.";
+  return "Usage: browser-auth login [website-url] [--config <module>] [--input <file>] [--cdp <endpoint>] [--target-id <id>] [--account-id <id>] [--label <label>] [--save yes|ask|never] [--forget] [--json]\n       browser-auth accounts <list|remove> [id] [--config <module>] [--service-origin <origin>] [--credential-origin <origin>] [--json]\nDefaults: OpenAI gpt-6-luna (OPENAI_API_KEY), CDP http://127.0.0.1:9222, save ask.";
 }
 type Parsed =
   | {
-      command: "login" | "logout" | "switch";
+      command: "login";
       url?: string;
       values: Map<string, string>;
       forget: boolean;
@@ -167,8 +162,7 @@ function parse(argv: readonly string[]): Parsed {
       json,
     };
   }
-  if (command !== "login" && command !== "logout" && command !== "switch")
-    throw new Error("usage");
+  if (command !== "login") throw new Error("usage");
   let index = 1;
   let url: string | undefined;
   if (argv[index] && !argv[index]!.startsWith("--")) url = argv[index++];
@@ -204,7 +198,6 @@ function parse(argv: readonly string[]): Parsed {
   const save = values.get("--save");
   if (save && !["yes", "ask", "never"].includes(save)) throw new Error("usage");
   if (!url && !values.get("--input")) throw new Error("usage");
-  if (forget && command !== "logout") throw new Error("usage");
   return { command, ...(url ? { url } : {}), values, forget, json };
 }
 
@@ -213,21 +206,21 @@ async function answer(
   prompts: CliPrompts,
   signal: AbortSignal,
 ): Promise<AuthResponse> {
+  if (interaction.kind === "session") {
+    const choiceId = await prompts.select(
+      "Already signed in. How would you like to proceed?",
+      interaction.choices.map((choice) => ({
+        name: choice.label,
+        value: choice.id,
+      })),
+      signal,
+    );
+    return { kind: "choose", interactionId: interaction.id, choiceId };
+  }
   if (interaction.kind === "confirm") {
-    const label =
-      "accountLabel" in interaction.confirmation
-        ? interaction.confirmation.accountLabel
-        : undefined;
     const messages = {
       "use-credentials": `Allow credentials to be used for ${interaction.confirmation.kind === "use-credentials" ? interaction.confirmation.origin : "this website"}?`,
       "save-credentials": "Save these credentials?",
-      "confirm-sign-in": label
-        ? `Is the browser signed in as ${safe(label)}?`
-        : "Is the browser signed in?",
-      "confirm-sign-out": "Is the browser signed out?",
-      "confirm-account-switch": label
-        ? `Did the browser switch to ${safe(label)}?`
-        : "Did the browser switch accounts?",
     };
     const accepted = await prompts.confirm(
       messages[interaction.confirmation.kind],
@@ -573,9 +566,7 @@ export async function runCli(
         ? { label: args.values.get("--label") }
         : {}),
       ...(args.values.get("--save") ? { save: args.values.get("--save") } : {}),
-      ...(args.command === "logout" && args.forget
-        ? { forgetCredentials: true }
-        : {}),
+      ...(args.forget ? { forgetCredentials: true } : {}),
     };
     if (!operation.cdpUrl) {
       operation.cdpUrl =
@@ -587,16 +578,11 @@ export async function runCli(
     }
     const controller = new AbortController();
     operation.signal = controller.signal;
-    validateOperationOptions(args.command, operation);
+    validateOperationOptions(operation);
     const onInterrupt = () => controller.abort();
     process.once("SIGINT", onInterrupt);
     try {
-      const flow =
-        args.command === "login"
-          ? client.login(operation as unknown as LoginOptions)
-          : args.command === "switch"
-            ? client.switchAccount(operation as unknown as SwitchOptions)
-            : client.logout(operation as unknown as LogoutOptions);
+      const flow = client.login(operation as unknown as LoginOptions);
       const result = await (args.json
         ? renderJson(flow, deps, controller)
         : renderInteractive(flow, deps, controller));
@@ -626,7 +612,9 @@ export async function runCli(
         deps.stderr.write("Credentials could not be deleted.\n");
       return failed
         ? 1
-        : result.status === "authenticated" || result.status === "signed-out"
+        : result.status === "authenticated" ||
+            result.status === "signed-out" ||
+            result.status === "already-signed-in"
           ? 0
           : result.status === "cancelled"
             ? 130

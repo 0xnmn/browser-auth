@@ -12,13 +12,13 @@ The Node process, caller, credential store, AI SDK provider implementation, conf
 - Models return schema-validated proposals rather than JavaScript, selectors, cookies, or network tools. Non-form clicks require user interaction. Native form submission must be associated with the observed fields.
 - Credential destination consent uses exact HTTP(S) origins; non-loopback HTTP and URL userinfo are rejected. Saved service associations do not grant new credential-origin permission.
 - Captured element handles are revalidated before writes; stale navigation/control references fail instead of being rematched. This narrows races but cannot make a hostile, mutating DOM atomic.
-- Responses bind to a single-use interaction ID. Old responses are rejected; confirmations are authored by the controller. Page-provided text is still untrusted and can be socially misleading.
+- Responses bind to a single-use interaction ID. Old responses are rejected. The only confirmations are controller-authored credential-use destination consent and credential-save consent. Page-provided text is still untrusted and can be socially misleading.
 - No raw exception serialization in flow output. Opt-in traces use fixed names and metadata. Model-adapter telemetry is disabled. UI responses, store calls, CDP endpoints, and page content must never be logged by the host.
 - Storage errors remain separate from website outcomes. Uncertain/cancelled writes are not automatically retried.
 
 ## Not protected
 
-A website receiving a credential can read it, forward it, change form destinations, encode it, or reflect it in unrecognized forms. The library cannot isolate credentials from other CDP clients, extensions, browser instrumentation, same-process code, heap dumps, or provider instrumentation installed by the caller. Do not use an untrusted page just because its origin was displayed. The human is responsible for checking origin and session/account outcome; model output is not independent proof.
+A website receiving a credential can read it, forward it, change form destinations, encode it, or reflect it in unrecognized forms. The library cannot isolate credentials from other CDP clients, extensions, browser instrumentation, same-process code, heap dumps, or provider instrumentation installed by the caller. Do not use an untrusted page just because its origin was displayed. Login, logout, and account-change outcomes are inferred by the model from the page, not independently verified identity or session proof. A returned `accountId` identifies a saved credential record, not the browser's current account.
 
 Only an in-memory plaintext store ships. Custom stores receive raw values and must implement encryption, durable writes, authorization, secret rotation, and deletion policy as appropriate. Clearing references is not cryptographic erasure. Account labels, hints, and origins are sensitive metadata even though not passwords.
 

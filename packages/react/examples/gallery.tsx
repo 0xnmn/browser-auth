@@ -6,6 +6,31 @@ import "../src/styles.css";
 
 const scenarios: Array<{ name: string; snapshot: AuthSnapshot }> = [
   {
+    name: "Existing session",
+    snapshot: { status: "done", result: { status: "already-signed-in" } },
+  },
+  {
+    name: "Website account choices",
+    snapshot: {
+      status: "waiting",
+      interaction: {
+        id: "native-accounts",
+        kind: "session",
+        choices: [
+          { id: "alice", label: "Personal Alice", kind: "switch" },
+          { id: "bob", label: "Work Bob", kind: "switch" },
+          { id: "add", label: "Add another account", kind: "add" },
+          { id: "logout", label: "Log out", kind: "logout" },
+          {
+            id: "finish",
+            label: "Keep this session and finish",
+            kind: "finish",
+          },
+        ],
+      },
+    },
+  },
+  {
     name: "Credentials and Back",
     snapshot: {
       status: "waiting",
@@ -62,15 +87,14 @@ const scenarios: Array<{ name: string; snapshot: AuthSnapshot }> = [
     },
   },
   {
-    name: "Account confirmation",
+    name: "Save consent",
     snapshot: {
       status: "waiting",
       interaction: {
         id: "identity",
         kind: "confirm",
         confirmation: {
-          kind: "confirm-account-switch",
-          accountLabel: "Work account",
+          kind: "save-credentials",
         },
         choices: [
           { id: "yes", label: "Yes" },

@@ -107,6 +107,17 @@ import { parseProposal } from '@browser-auth/core';
 const auth = createAuth(options);
 const snapshot = parseSnapshot({status:'running',message:'test'});
 const result: AuthResult = { status: 'authenticated', save: {status:'not-saved'} };
+auth.login({cdpUrl:'http://127.0.0.1:9222',url:'https://example.com'});
+auth.login({cdpUrl:'http://127.0.0.1:9222',url:'https://example.com',accountId:'saved-account'});
+auth.login({cdpUrl:'http://127.0.0.1:9222',url:'https://example.com',accountId:'saved-account',forgetCredentials:true});
+// @ts-expect-error Logout credential deletion requires a saved credential record.
+auth.login({cdpUrl:'http://127.0.0.1:9222',url:'https://example.com',forgetCredentials:true});
+// @ts-expect-error Action-based flows were removed.
+auth.login({cdpUrl:'http://127.0.0.1:9222',url:'https://example.com',action:'switch-account'});
+// @ts-expect-error Standalone logout was removed.
+auth.logout({cdpUrl:'http://127.0.0.1:9222',url:'https://example.com'});
+// @ts-expect-error Standalone account switching was removed.
+auth.switchAccount({cdpUrl:'http://127.0.0.1:9222',url:'https://example.com'});
 createAuth({model: {provider:'openai',model:'example-model'}});
 createAuth({model: {provider:'openai',model:'example-model',api:'chat',baseURL:'https://proxy.example/v1'}});
 createAuth({model: {provider:'gateway',model:'anthropic/primary',providerOptions:{gateway:{only:['anthropic'],models:['anthropic/fallback']}}}});

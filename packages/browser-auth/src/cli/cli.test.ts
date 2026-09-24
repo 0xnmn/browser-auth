@@ -61,7 +61,9 @@ function deferred<T>() {
 function harness(authFlow: AuthFlow) {
   let out = "";
   let err = "";
-  const login = vi.fn(() => authFlow);
+  const login = vi.fn(
+    (_options: Parameters<AuthClient["login"]>[0]) => authFlow,
+  );
   const deps: Partial<CliDependencies> = {
     env: { BROWSER_AUTH_CDP_URL: "ws://secret-endpoint" },
     stdout: new Writable({
@@ -83,8 +85,6 @@ function harness(authFlow: AuthFlow) {
       () =>
         ({
           login,
-          logout: vi.fn(),
-          switchAccount: vi.fn(),
           accounts: {},
         }) as unknown as AuthClient,
     ),
@@ -295,7 +295,7 @@ describe("runCli", () => {
     await run;
   });
 
-  it("includes the account label in identity-specific confirmations", async () => {
+  it("prompts for credential-use consent", async () => {
     const controlled = controlledFlow();
     const h = harness(controlled.flow);
     vi.mocked(h.deps.prompts!.confirm).mockResolvedValue(true);
@@ -308,7 +308,10 @@ describe("runCli", () => {
       interaction: {
         id: "confirm",
         kind: "confirm",
-        confirmation: { kind: "confirm-sign-in", accountLabel: "Work" },
+        confirmation: {
+          kind: "use-credentials",
+          origin: "https://identity.example",
+        },
         choices: [
           { id: "yes", label: "Yes" },
           { id: "no", label: "No" },
@@ -317,12 +320,67 @@ describe("runCli", () => {
     } as AuthSnapshot);
     await vi.waitFor(() =>
       expect(h.deps.prompts!.confirm).toHaveBeenCalledWith(
-        "Is the browser signed in as Work?",
+        "Allow credentials to be used for https://identity.example?",
         expect.any(AbortSignal),
       ),
     );
     controlled.publish({ status: "done", result: { status: "cancelled" } });
     await run;
+  });
+
+  it("answers a session interaction with the website-provided choice", async () => {
+    const controlled = controlledFlow();
+    const h = harness(controlled.flow);
+    vi.mocked(h.deps.prompts!.select).mockResolvedValue("native-logout");
+    const run = runCli(
+      ["login", "https://example.test", "--config", "config.mjs"],
+      h.deps,
+    );
+    controlled.publish({
+      status: "waiting",
+      interaction: {
+        id: "session",
+        kind: "session",
+        choices: [
+          { id: "done", label: "Keep using this account", kind: "finish" },
+          { id: "native-logout", label: "Sign out here", kind: "logout" },
+          { id: "account-menu", label: "Open profile menu", kind: "accounts" },
+        ],
+      },
+    });
+    await vi.waitFor(() =>
+      expect(controlled.respond).toHaveBeenCalledWith({
+        kind: "choose",
+        interactionId: "session",
+        choiceId: "native-logout",
+      }),
+    );
+    expect(h.deps.prompts!.select).toHaveBeenCalledWith(
+      "Already signed in. How would you like to proceed?",
+      [
+        { name: "Keep using this account", value: "done" },
+        { name: "Sign out here", value: "native-logout" },
+        { name: "Open profile menu", value: "account-menu" },
+      ],
+      expect.any(AbortSignal),
+    );
+    controlled.publish({
+      status: "done",
+      result: { status: "signed-out", deletion: "not-requested" },
+    });
+    expect(await run).toBe(0);
+    expect(h.login).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects the removed --action option", async () => {
+    const h = harness(flow([]));
+    expect(
+      await runCli(
+        ["login", "https://example.test", "--action", "logout"],
+        h.deps,
+      ),
+    ).toBe(2);
+    expect(h.login).not.toHaveBeenCalled();
   });
 
   it.each([
