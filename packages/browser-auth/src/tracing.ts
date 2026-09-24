@@ -1,11 +1,9 @@
 import type { AuthResult } from "./protocol.js";
+import type { AuthProposal } from "./agent/proposals.js";
 
 export interface AuthTrace {
   step(index: number): void;
-  action(
-    kind:
-      "click" | "form" | "external" | "done" | "wait" | "session" | "opener",
-  ): void;
+  action(kind: AuthProposal["kind"]): void;
   end(result: AuthResult["status"]): void;
 }
 export interface AuthTracer {

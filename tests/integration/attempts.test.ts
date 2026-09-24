@@ -126,8 +126,19 @@ class AttemptAgent extends FixtureAgent {
         (element) => element.label === "Reauthenticate B",
       )!;
       return {
-        kind: "session",
-        choices: [{ elementId: link.id, label: link.label, kind: "switch" }],
+        kind: "ask_user",
+        message: "Choose an account",
+        fields: [],
+        submitElementId: null,
+        external: false,
+        choices: [
+          {
+            elementId: "finish",
+            label: "Keep using this account",
+            intent: "finish",
+          },
+          { elementId: link.id, label: link.label, intent: "switch" },
+        ],
       };
     }
     if (observation.text.includes("Added account"))
@@ -143,7 +154,9 @@ class AttemptAgent extends FixtureAgent {
     );
     if (fields.length)
       return {
-        kind: "form",
+        kind: "ask_user",
+        message: "Enter details",
+        external: false,
         fields: fields.map((element) => ({
           elementId: element.id,
           key: element.label.trim().toLowerCase(),
@@ -161,7 +174,7 @@ class AttemptAgent extends FixtureAgent {
           .map((element) => ({
             elementId: element.id,
             label: element.label,
-            back: true,
+            intent: "back",
           })),
         submitElementId:
           observation.elements.find((element) => element.tag === "button")
@@ -216,14 +229,16 @@ it("discards filled saved A candidates before a native switch to B", async () =>
         async next(observation) {
           if (observation.text.includes("Pending verification"))
             return {
-              kind: "form",
+              kind: "ask_user",
+              message: "Enter details",
+              external: false,
               fields: [],
               submitElementId: null,
               choices: [
                 {
                   elementId: observation.elements[0]!.id,
                   label: "Back",
-                  back: true,
+                  intent: "back",
                 },
               ],
             };
@@ -270,7 +285,7 @@ it("discards filled saved A candidates before a native switch to B", async () =>
     run.snapshots.some(
       (snapshot) =>
         snapshot.status === "waiting" &&
-        snapshot.interaction.kind === "confirm" &&
+        snapshot.interaction.confirmation &&
         snapshot.interaction.confirmation.kind === "save-credentials",
     ),
   ).toBe(false);
@@ -305,7 +320,7 @@ it("keeps an add attempt alive across password Back and saves corrected email", 
         };
       }
       if (
-        interaction.kind === "form" &&
+        !interaction.confirmation &&
         interaction.fields.some((field) => field.type === "email")
       )
         return {
@@ -349,31 +364,52 @@ it.each(["external", "click", "empty-form"] as const)(
         const element = observation.elements[0]!;
         if (observation.text.includes("Dashboard"))
           return {
-            kind: "session",
+            kind: "ask_user",
+            message: "Choose an account",
+            fields: [],
+            submitElementId: null,
+            external: false,
             choices: [
-              { elementId: element.id, label: "Add account", kind: "add" },
+              {
+                elementId: "finish",
+                label: "Keep using this account",
+                intent: "finish",
+              },
+              { elementId: element.id, label: "Add account", intent: "add" },
             ],
           };
         if (observation.text.includes("Challenge"))
           return {
-            kind: "external",
+            kind: "ask_user",
+            fields: [],
+            submitElementId: null,
+            external: true,
             message: "Choose another method",
-            choices: [{ elementId: element.id, label: "Back", back: true }],
+            choices: [{ elementId: element.id, label: "Back", intent: "back" }],
           };
         if (observation.text.includes("Choose method")) {
           if (mode === "click") return { kind: "click", elementId: element.id };
           if (mode === "external")
             return {
-              kind: "external",
+              kind: "ask_user",
+              fields: [],
+              submitElementId: null,
+              external: true,
               message: "Continue",
               choices: [
-                { elementId: element.id, label: "Continue", back: false },
+                {
+                  elementId: element.id,
+                  label: "Continue",
+                  intent: "continue",
+                },
               ],
             };
           if (!emptyFormProposed) {
             emptyFormProposed = true;
             return {
-              kind: "form",
+              kind: "ask_user",
+              message: "Enter details",
+              external: false,
               fields: [],
               choices: [],
               submitElementId: null,
@@ -459,7 +495,7 @@ it.each(["never", "declined", "cancelled"] as const)(
       }),
       (interaction) => {
         if (
-          interaction.kind === "confirm" &&
+          interaction.confirmation &&
           interaction.confirmation.kind === "save-credentials"
         ) {
           if (mode === "cancelled") {
@@ -529,8 +565,17 @@ it.each([false, true])(
         const button = observation.elements.find(
           (element) => element.tag === "button" || element.tag === "a",
         );
-        if (!button) return { kind: "wait" };
-        return { kind: "click", elementId: button.id };
+        if (!button) return { kind: "wait", milliseconds: 150 };
+        return {
+          kind: "ask_user",
+          message: "Continue with SSO",
+          fields: [],
+          submitElementId: null,
+          external: false,
+          choices: [
+            { elementId: button.id, label: button.label, intent: "continue" },
+          ],
+        };
       },
     };
     const run = await complete(

@@ -86,7 +86,9 @@ function Result({ result }: { result: AuthResult }) {
 function Confirmation({
   interaction,
 }: {
-  interaction: Extract<AuthInteraction, { kind: "confirm" }>;
+  interaction: AuthInteraction & {
+    confirmation: NonNullable<AuthInteraction["confirmation"]>;
+  };
 }) {
   const confirmation = interaction.confirmation;
   if (confirmation.kind === "use-credentials")
@@ -130,7 +132,7 @@ function Interaction({
     if (pendingRef.current) return;
     const values: Record<string, string> = {};
     const data = new FormData(event.currentTarget);
-    for (const field of interaction.kind === "form" ? interaction.fields : [])
+    for (const field of interaction.fields)
       values[field.id] = String(data.get(field.id) ?? "");
     event.currentTarget.reset();
     void send({ kind: "submit", interactionId: interaction.id, values });
@@ -161,30 +163,28 @@ function Interaction({
 
   return (
     <>
-      {interaction.kind === "session" && (
-        <>
-          <h2>Already signed in</h2>
-          <p>Choose how to continue with this browser session.</p>
-        </>
-      )}
-      {interaction.kind === "external" && (
-        <>
-          <h2>Waiting for confirmation</h2>
-          <p>{interaction.message}</p>
-        </>
-      )}
-      {interaction.kind === "confirm" && (
+      {interaction.confirmation && (
         <>
           <h2>Confirm action</h2>
-          <Confirmation interaction={interaction} />
+          <Confirmation
+            interaction={
+              interaction as AuthInteraction & {
+                confirmation: NonNullable<AuthInteraction["confirmation"]>;
+              }
+            }
+          />
         </>
       )}
-      {interaction.kind === "form" && (
+      {!interaction.confirmation && (
         <form ref={formRef} onSubmit={submit} autoComplete="on">
           <h2>
-            {interaction.fields.length ? "Enter details" : "Choose an action"}
+            {interaction.fields.length
+              ? "Enter details"
+              : interaction.choices.length
+                ? "Choose an action"
+                : "Waiting"}
           </h2>
-          {interaction.message && <p>{interaction.message}</p>}
+          <p>{interaction.message}</p>
           {interaction.fields.map((field) => (
             <label className="browser-auth__field" key={field.id}>
               {field.label}
@@ -216,7 +216,7 @@ function Interaction({
           </div>
         </form>
       )}
-      {interaction.kind !== "form" && (
+      {interaction.confirmation && (
         <div className="browser-auth__actions">{choices}</div>
       )}
       {pending && <p role="status">Submitting…</p>}

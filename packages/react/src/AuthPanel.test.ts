@@ -14,7 +14,8 @@ describe("AuthPanel", () => {
       status: "waiting",
       interaction: {
         id: "confirm",
-        kind: "confirm",
+        message: "Allow stored credentials?",
+        fields: [],
         confirmation: {
           kind: "use-credentials",
           origin: "https://login.example.test:8443",
@@ -31,7 +32,7 @@ describe("AuthPanel", () => {
       status: "waiting",
       interaction: {
         id: "form",
-        kind: "form",
+        message: "Enter credentials",
         fields: [
           {
             id: "password",

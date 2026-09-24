@@ -53,32 +53,37 @@ it.each([false, true])(
             const menu = observation.elements.find(
               (element) => element.expanded === false,
             );
-            if (menu)
-              return {
-                kind: "session",
-                choices: [
-                  { elementId: menu.id, label: menu.label, kind: "accounts" },
-                ],
-              };
+            if (menu) return { kind: "click", elementId: menu.id };
             expect(
               observation.elements.filter(
                 (element) => element.expanded === true,
               ),
             ).toHaveLength(2);
             return {
-              kind: "session",
-              choices: observation.elements
-                .filter((element) => element.tag === "a")
-                .map((element) => ({
-                  elementId: element.id,
-                  label: element.label,
-                  kind:
-                    element.label === "Sign out"
-                      ? "logout"
-                      : element.label === "Work Bob"
-                        ? "switch"
-                        : "add",
-                })),
+              kind: "ask_user",
+              message: "Choose an account",
+              fields: [],
+              submitElementId: null,
+              external: false,
+              choices: [
+                {
+                  elementId: "finish",
+                  label: "Keep using this account",
+                  intent: "finish",
+                },
+                ...observation.elements
+                  .filter((element) => element.tag === "a")
+                  .map((element) => ({
+                    elementId: element.id,
+                    label: element.label,
+                    intent:
+                      element.label === "Sign out"
+                        ? ("logout" as const)
+                        : element.label === "Work Bob"
+                          ? ("switch" as const)
+                          : ("add" as const),
+                  })),
+              ],
             };
           },
         },
@@ -86,7 +91,7 @@ it.each([false, true])(
       (interaction) => {
         prompts++;
         expect(observations).toBe(3);
-        expect(interaction.kind).toBe("session");
+        expect(interaction.fields).toEqual([]);
         expect(interaction.choices.map((choice) => choice.kind)).toEqual(
           logoutOnly
             ? ["finish", "logout"]
@@ -124,14 +129,16 @@ it.each(["navigation", "method-choice"] as const)(
               return mode === "navigation"
                 ? { kind: "click", elementId: link.id }
                 : {
-                    kind: "form",
+                    kind: "ask_user",
+                    message: "Enter details",
+                    external: false,
                     fields: [],
                     submitElementId: null,
                     choices: [
                       {
                         elementId: link.id,
                         label: "Use password",
-                        back: false,
+                        intent: "continue",
                       },
                     ],
                   };
@@ -145,14 +152,14 @@ it.each(["navigation", "method-choice"] as const)(
         save: "ask",
       }),
       async (interaction) => {
-        if (interaction.kind === "form") {
+        if (!interaction.confirmation) {
           expect(mode).toBe("method-choice");
           expect(interaction.choices).toHaveLength(1);
           expect(interaction.choices[0]?.label).toBe("Use password");
           expect(await page.locator("h1").innerText()).toBe("Signed out");
           choseMethod = true;
         } else {
-          expect(interaction.kind).toBe("confirm");
+          expect(interaction.confirmation).toBeDefined();
         }
         return defaultResponse(interaction);
       },
@@ -164,7 +171,7 @@ it.each(["navigation", "method-choice"] as const)(
     expect(choseMethod).toBe(mode === "method-choice");
     expect(
       run.snapshots.flatMap((snapshot) =>
-        snapshot.status === "waiting" && snapshot.interaction.kind === "confirm"
+        snapshot.status === "waiting" && snapshot.interaction.confirmation
           ? [snapshot.interaction.confirmation.kind]
           : [],
       ),
@@ -219,7 +226,7 @@ it("uses one login flow for native session actions", async () => {
       }
       return add
         ? { kind: "choose", interactionId: interaction.id, choiceId: add.id }
-        : interaction.kind === "form" &&
+        : !interaction.confirmation &&
             interaction.message === "Choose a saved login"
           ? { kind: "choose", interactionId: interaction.id, choiceId: "new" }
           : defaultResponse(interaction);
@@ -287,7 +294,7 @@ it("uses one login flow for native session actions", async () => {
     reuse.snapshots.some(
       (snapshot) =>
         snapshot.status === "waiting" &&
-        snapshot.interaction.kind === "form" &&
+        snapshot.interaction.confirmation === undefined &&
         snapshot.interaction.message === "Choose a saved login",
     ),
   ).toBe(true);
@@ -330,7 +337,8 @@ it("finishes an existing session without mutation or credential reads", async ()
     already.snapshots.some(
       (snapshot) =>
         snapshot.status === "waiting" &&
-        snapshot.interaction.kind === "session" &&
+        snapshot.interaction.confirmation === undefined &&
+        snapshot.interaction.fields.length === 0 &&
         snapshot.interaction.choices.some((choice) => choice.kind === "finish"),
     ),
   ).toBe(true);
@@ -403,7 +411,7 @@ it("does not invent missing website session capabilities", async () => {
   const run = await complete(
     createAuth({ agent: new FixtureAgent() }).login(authTarget(shared, page)),
     (interaction) => {
-      expect(interaction.kind).toBe("session");
+      expect(interaction.fields).toEqual([]);
       expect(interaction.choices.map((choice) => choice.kind)).toEqual([
         "finish",
         "logout",
@@ -432,7 +440,22 @@ it.each(["logout", "finish", "reload", "replace", "clone"])(
       agent:
         change === "logout" || change === "clone"
           ? new FixtureAgent()
-          : { next: async () => ({ kind: "session", choices: [] }) },
+          : {
+              next: async () => ({
+                kind: "ask_user" as const,
+                message: "Choose an account",
+                fields: [],
+                choices: [
+                  {
+                    elementId: "finish",
+                    label: "Keep using this account",
+                    intent: "finish" as const,
+                  },
+                ],
+                submitElementId: null,
+                external: false,
+              }),
+            },
     }).login(authTarget(shared, page));
     const iterator = flow.updates()[Symbol.asyncIterator]();
     let snapshot = await iterator.next();
@@ -514,7 +537,9 @@ it.each(["completion", "credentials", "logout"])(
                 return { kind: "done", outcome: "account-changed" };
               if (next === "credentials")
                 return {
-                  kind: "form",
+                  kind: "ask_user",
+                  message: "Enter details",
+                  external: false,
                   fields: [
                     {
                       elementId: "fake",
@@ -528,14 +553,23 @@ it.each(["completion", "credentials", "logout"])(
                   submitElementId: null,
                 };
               return {
-                kind: "session",
+                kind: "ask_user",
+                message: "Choose an account",
+                fields: [],
+                submitElementId: null,
+                external: false,
                 choices: [
+                  {
+                    elementId: "finish",
+                    label: "Keep using this account",
+                    intent: "finish",
+                  },
                   {
                     elementId: observation.elements.find(
                       (element) => element.label === "Sign out",
                     )!.id,
                     label: "Sign out",
-                    kind: "logout",
+                    intent: "logout",
                   },
                 ],
               };
@@ -561,7 +595,7 @@ it.each(["completion", "credentials", "logout"])(
       next === "completion"
         ? { status: "unknown" }
         : next === "credentials"
-          ? { status: "failed", error: { code: "unsupported" } }
+          ? { status: "failed", error: { code: "stale_page" } }
           : { status: "signed-out" },
     );
     expect(reads).toBe(0);
@@ -589,7 +623,9 @@ it("does not complete account addition after Back", async () => {
             return { kind: "done", outcome: "account-changed" };
           if (observation.text.includes("Add another account"))
             return {
-              kind: "form",
+              kind: "ask_user",
+              message: "Enter details",
+              external: false,
               fields: [],
               submitElementId: null,
               choices: [
@@ -598,7 +634,7 @@ it("does not complete account addition after Back", async () => {
                     (element) => element.label === "Back",
                   )!.id,
                   label: "Back",
-                  back: true,
+                  intent: "back",
                 },
               ],
             };
@@ -692,7 +728,7 @@ it("binds cross-origin iframe credentials to the actual identity origin", async 
     run.snapshots.some(
       (snapshot) =>
         snapshot.status === "waiting" &&
-        snapshot.interaction.kind === "confirm" &&
+        snapshot.interaction.confirmation &&
         snapshot.interaction.confirmation.kind === "use-credentials" &&
         snapshot.interaction.confirmation.origin === identity.url,
     ),
@@ -727,7 +763,9 @@ it("rejects stale element handles and empty-form submit bypasses", async () => {
     agent: {
       async next(observation) {
         return {
-          kind: "form",
+          kind: "ask_user",
+          message: "Enter details",
+          external: false,
           fields: [],
           choices: [],
           submitElementId: observation.elements.find(
@@ -850,7 +888,7 @@ it("cancels before input without writes and keeps known authentication if save c
     }),
     (interaction) => {
       if (
-        interaction.kind === "confirm" &&
+        interaction.confirmation &&
         interaction.confirmation.kind === "save-credentials"
       ) {
         saving.abort();

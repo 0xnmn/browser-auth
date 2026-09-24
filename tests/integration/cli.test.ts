@@ -23,11 +23,16 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
       let body = "";
       for await (const chunk of request) body += chunk;
       const { messages } = JSON.parse(body);
+      const content = messages.find(
+        (message: { role: string }) => message.role === "user",
+      ).content;
       const observation = JSON.parse(
-        messages.find((message: { role: string }) => message.role === "user")
-          .content,
+        typeof content === "string"
+          ? content
+          : content.find((part: { type: string }) => part.type === "text").text,
       );
       const proposal = await agent.next(observation);
+      const { kind, ...args } = proposal;
       response.setHeader("content-type", "application/json");
       response.end(
         JSON.stringify({
@@ -39,9 +44,16 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
               index: 0,
               message: {
                 role: "assistant",
-                content: JSON.stringify({ proposal }),
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-fixture",
+                    type: "function",
+                    function: { name: kind, arguments: JSON.stringify(args) },
+                  },
+                ],
               },
-              finish_reason: "stop",
+              finish_reason: "tool_calls",
             },
           ],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
@@ -112,11 +124,13 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
           JSON.stringify(defaultResponse(snapshot.interaction)) + "\n",
         );
     }
-    expect(await exited).toBe(0);
+    expect(await exited, JSON.stringify(snapshots.at(-1))).toBe(0);
     // The compatible provider warns that strict structured output is unavailable.
     expect(errors).not.toContain("browser-auth could not");
     expect(errors).not.toContain(fixturePassword);
     expect(agent.observations.length).toBeGreaterThan(0);
+    expect(agent.observations[0]!.tree).toContain('"ref"');
+    expect(agent.observations[0]!.tree).toContain("Username");
     expect(snapshots.at(-1)).toMatchObject({
       status: "done",
       result: { status: "authenticated" },

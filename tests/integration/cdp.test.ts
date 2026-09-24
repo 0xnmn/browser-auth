@@ -87,7 +87,7 @@ it("asks which same-origin CDP tab to use and authenticates the selected second 
       }),
       (interaction) => {
         if (
-          interaction.kind === "form" &&
+          !interaction.confirmation &&
           interaction.message === "Choose the existing tab to authenticate"
         ) {
           choseTab = true;

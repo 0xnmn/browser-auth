@@ -14,11 +14,16 @@ const observation: AuthObservation = {
   elements: [],
   availableCredentialKeys: ["password"],
 };
-const modelFor = (text: string) =>
+const modelFor = (...calls: Array<{ name: string; input: object }>) =>
   new MockLanguageModelV4({
     doGenerate: {
-      content: [{ type: "text", text }],
-      finishReason: { unified: "stop", raw: undefined },
+      content: calls.map(({ name, input }, index) => ({
+        type: "tool-call" as const,
+        toolCallId: `call-${index}`,
+        toolName: name,
+        input: JSON.stringify(input),
+      })),
+      finishReason: { unified: "tool-calls", raw: undefined },
       usage: {
         inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
         outputTokens: { total: 1, text: 1, reasoning: 0 },
@@ -27,35 +32,94 @@ const modelFor = (text: string) =>
     },
   });
 
-it("uses AI SDK structured generation and rejects actions outside the proposal contract", async () => {
-  const model = modelFor('{"proposal":{"kind":"wait"}}');
+it("uses real AI SDK tools without execute callbacks and validates the call", async () => {
+  const model = modelFor({ name: "wait", input: { milliseconds: 100 } });
   expect(
     await createStructuredAgent(model).next(observation, {
       signal: new AbortController().signal,
     }),
-  ).toEqual({ kind: "wait" });
+  ).toEqual({ kind: "wait", milliseconds: 100 });
   expect(model.doGenerateCalls).toHaveLength(1);
-  expect(model.doGenerateCalls[0]!.responseFormat?.type).toBe("json");
-  expect(model.doGenerateCalls[0]!.responseFormat).toMatchObject({
-    schema: {
-      type: "object",
-      required: ["proposal"],
-      additionalProperties: false,
-      properties: { proposal: { anyOf: expect.any(Array) } },
-    },
-  });
-  expect(
-    (model.doGenerateCalls[0]!.responseFormat as { schema: object }).schema,
-  ).not.toHaveProperty("anyOf");
-  const forged = modelFor(
-    '{"proposal":{"kind":"evaluate","script":"fetch(document.cookie)"}}',
+  expect(model.doGenerateCalls[0]!.toolChoice).toEqual({ type: "required" });
+  expect(model.doGenerateCalls[0]!.tools).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        name: "ask_user",
+        description: expect.any(String),
+      }),
+      expect.objectContaining({
+        name: "click",
+        description: expect.any(String),
+      }),
+    ]),
   );
+  expect(model.doGenerateCalls[0]!.tools).not.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        name: expect.stringMatching(/^(form|session|external)$/),
+      }),
+    ]),
+  );
+  expect(
+    model.doGenerateCalls[0]!.tools!.every((entry) => !("execute" in entry)),
+  ).toBe(true);
+  const forged = modelFor({ name: "wait", input: {} });
   await expect(
     createStructuredAgent(forged).next(observation, {
       signal: new AbortController().signal,
     }),
   ).rejects.toMatchObject({ code: "model_output_invalid" });
   expect(forged.doGenerateCalls).toHaveLength(1);
+});
+
+it("forwards screenshots as images, not base64 in observation text", async () => {
+  const model = modelFor({ name: "observe", input: {} });
+  await createStructuredAgent(model).next(
+    {
+      ...observation,
+      screenshot: {
+        mediaType: "image/png",
+        data: "cG5n",
+        width: 1,
+        height: 1,
+      },
+    },
+    { signal: new AbortController().signal },
+  );
+  const prompt = model.doGenerateCalls[0]!.prompt;
+  expect(prompt[1]).toMatchObject({
+    role: "user",
+    content: [
+      expect.objectContaining({ type: "text" }),
+      expect.objectContaining({
+        type: "file",
+        mediaType: "image/png",
+        data: { type: "data", data: "cG5n" },
+      }),
+    ],
+  });
+  expect(
+    JSON.stringify((prompt[1] as { content: unknown[] }).content[0]),
+  ).not.toContain("cG5n");
+});
+
+it.each([
+  ["zero", []],
+  [
+    "multiple",
+    [
+      { name: "observe", input: {} },
+      { name: "back", input: {} },
+    ],
+  ],
+  ["unknown", [{ name: "evaluate", input: { script: "document.cookie" } }]],
+] as const)("rejects %s tool calls", async (_label, calls) => {
+  const model = modelFor(...calls);
+  await expect(
+    createStructuredAgent(model).next(observation, {
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow();
 });
 
 it.each([false, true])(
@@ -87,9 +151,19 @@ it.each([false, true])(
               index: 0,
               message: {
                 role: "assistant",
-                content: '{"proposal":{"kind":"wait"}}',
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-0",
+                    type: "function",
+                    function: {
+                      name: "wait",
+                      arguments: '{"milliseconds":100}',
+                    },
+                  },
+                ],
               },
-              finish_reason: "stop",
+              finish_reason: "tool_calls",
             },
           ],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
@@ -111,7 +185,7 @@ it.each([false, true])(
       });
       expect(
         await agent.next(observation, { signal: new AbortController().signal }),
-      ).toEqual({ kind: "wait" });
+      ).toEqual({ kind: "wait", milliseconds: 100 });
       expect(requests).toHaveLength(1);
       expect(requests[0]).toMatchObject({
         path: "/v1/chat/completions?route=eu",
@@ -119,9 +193,7 @@ it.each([false, true])(
         tenant: "fixture-tenant",
         body: {
           model: "fixture-model",
-          response_format: {
-            type: supportsStructuredOutputs ? "json_schema" : "json_object",
-          },
+          tool_choice: "required",
         },
       });
       expect(JSON.stringify(requests[0]!.body)).not.toContain(
@@ -196,8 +268,15 @@ it("forwards Gateway routing unchanged alongside model selection and endpoint he
     response.setHeader("content-type", "application/json");
     response.end(
       JSON.stringify({
-        content: [{ type: "text", text: '{"proposal":{"kind":"wait"}}' }],
-        finishReason: { unified: "stop" },
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-0",
+            toolName: "wait",
+            input: '{"milliseconds":100}',
+          },
+        ],
+        finishReason: { unified: "tool-calls" },
         usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } },
         warnings: [],
       }),
@@ -224,7 +303,7 @@ it("forwards Gateway routing unchanged alongside model selection and endpoint he
     routing.models[0] = "other/model";
     expect(
       await agent.next(observation, { signal: new AbortController().signal }),
-    ).toEqual({ kind: "wait" });
+    ).toEqual({ kind: "wait", milliseconds: 100 });
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({
       path: "/gateway/language-model",

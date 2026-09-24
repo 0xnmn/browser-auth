@@ -36,7 +36,7 @@ it("exports spans to the configured OTLP endpoint without installing a global pr
     });
     const flow = tracing.tracer.startFlow("login");
     flow.step(2);
-    flow.action("form");
+    flow.action("ask_user");
     flow.end("authenticated");
     await tracing.shutdown();
 
@@ -49,7 +49,7 @@ it("exports spans to the configured OTLP endpoint without installing a global pr
     expect(payload).toContain("login");
     expect(payload).toContain("auth.step");
     expect(payload).toContain("auth.action");
-    expect(payload).toContain("form");
+    expect(payload).toContain("ask_user");
     expect(payload).toContain("auth.result");
     expect(payload).toContain("authenticated");
 

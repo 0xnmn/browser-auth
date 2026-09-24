@@ -15,7 +15,8 @@ const scenarios: Array<{ name: string; snapshot: AuthSnapshot }> = [
       status: "waiting",
       interaction: {
         id: "native-accounts",
-        kind: "session",
+        message: "Choose how to continue with this browser session.",
+        fields: [],
         choices: [
           { id: "alice", label: "Personal Alice", kind: "switch" },
           { id: "bob", label: "Work Bob", kind: "switch" },
@@ -36,7 +37,6 @@ const scenarios: Array<{ name: string; snapshot: AuthSnapshot }> = [
       status: "waiting",
       interaction: {
         id: "credentials",
-        kind: "form",
         message: "Continue signing in to your existing browser.",
         fields: [
           { id: "email", label: "Email", type: "email", required: true },
@@ -57,7 +57,6 @@ const scenarios: Array<{ name: string; snapshot: AuthSnapshot }> = [
       status: "waiting",
       interaction: {
         id: "accounts",
-        kind: "form",
         message: "Choose a saved login",
         fields: [],
         choices: [
@@ -74,7 +73,8 @@ const scenarios: Array<{ name: string; snapshot: AuthSnapshot }> = [
       status: "waiting",
       interaction: {
         id: "consent",
-        kind: "confirm",
+        message: "Allow credentials?",
+        fields: [],
         confirmation: {
           kind: "use-credentials",
           origin: "https://accounts.example.com",
@@ -92,7 +92,8 @@ const scenarios: Array<{ name: string; snapshot: AuthSnapshot }> = [
       status: "waiting",
       interaction: {
         id: "identity",
-        kind: "confirm",
+        message: "Save credentials?",
+        fields: [],
         confirmation: {
           kind: "save-credentials",
         },
@@ -109,10 +110,11 @@ const scenarios: Array<{ name: string; snapshot: AuthSnapshot }> = [
       status: "waiting",
       interaction: {
         id: "external",
-        kind: "external",
         message:
           "Complete the passkey or approval prompt in the existing browser. This flow will check again.",
+        fields: [],
         choices: [],
+        pollAfterMs: 2000,
       },
     },
   },

@@ -40,7 +40,7 @@ export type AuthResult =
 export interface AuthChoice {
   id: string;
   label: string;
-  kind?: "back" | undefined;
+  kind?: "back" | "finish" | "logout" | "switch" | "add" | undefined;
 }
 export interface AuthField {
   id: string;
@@ -50,30 +50,14 @@ export interface AuthField {
 }
 export type AuthConfirmation =
   { kind: "use-credentials"; origin: string } | { kind: "save-credentials" };
-export type AuthInteraction =
-  | {
-      id: string;
-      kind: "session";
-      choices: Array<{
-        id: string;
-        label: string;
-        kind: "finish" | "logout" | "switch" | "add";
-      }>;
-    }
-  | {
-      id: string;
-      kind: "form";
-      message?: string | undefined;
-      fields: AuthField[];
-      choices: AuthChoice[];
-    }
-  | { id: string; kind: "external"; message: string; choices: AuthChoice[] }
-  | {
-      id: string;
-      kind: "confirm";
-      confirmation: AuthConfirmation;
-      choices: AuthChoice[];
-    };
+export interface AuthInteraction {
+  id: string;
+  message: string;
+  fields: AuthField[];
+  choices: AuthChoice[];
+  confirmation?: AuthConfirmation | undefined;
+  pollAfterMs?: number | undefined;
+}
 export type AuthResponse =
   | { kind: "submit"; interactionId: string; values: Record<string, string> }
   | { kind: "choose"; interactionId: string; choiceId: string };

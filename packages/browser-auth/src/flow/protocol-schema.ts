@@ -40,68 +40,67 @@ export type AuthResult = z.infer<typeof authResultSchema>;
 
 export const choiceSchema = z
   .object({
-    id: z.string(),
-    label: z.string(),
-    kind: z.literal("back").optional(),
+    id: z.string().min(1).max(256),
+    label: z.string().min(1),
+    kind: z.enum(["back", "finish", "logout", "switch", "add"]).optional(),
   })
   .strict();
 
 export const fieldSchema = z
   .object({
-    id: z.string(),
-    label: z.string(),
+    id: z.string().min(1).max(256),
+    label: z.string().min(1).max(500),
     type: z.enum(["text", "email", "phone", "password", "code"]),
     required: z.boolean(),
   })
   .strict();
 
-export const interactionSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      id: z.string(),
-      kind: z.literal("session"),
-      choices: z.array(
+export const interactionSchema = z
+  .object({
+    id: z.string().min(1).max(256),
+    message: z.string().min(1).max(2000),
+    fields: z.array(fieldSchema).max(32),
+    choices: z.array(choiceSchema),
+    confirmation: z
+      .discriminatedUnion("kind", [
         z
           .object({
-            id: z.string(),
-            label: z.string(),
-            kind: z.enum(["finish", "logout", "switch", "add"]),
+            kind: z.literal("use-credentials"),
+            origin: z.string().min(1).max(2048),
           })
           .strict(),
-      ),
-    })
-    .strict(),
-  z
-    .object({
-      id: z.string(),
-      kind: z.literal("form"),
-      message: z.string().optional(),
-      fields: z.array(fieldSchema),
-      choices: z.array(choiceSchema),
-    })
-    .strict(),
-  z
-    .object({
-      id: z.string(),
-      kind: z.literal("external"),
-      message: z.string(),
-      choices: z.array(choiceSchema),
-    })
-    .strict(),
-  z
-    .object({
-      id: z.string(),
-      kind: z.literal("confirm"),
-      confirmation: z.discriminatedUnion("kind", [
-        z
-          .object({ kind: z.literal("use-credentials"), origin: z.string() })
-          .strict(),
         z.object({ kind: z.literal("save-credentials") }).strict(),
-      ]),
-      choices: z.array(choiceSchema),
-    })
-    .strict(),
-]);
+      ])
+      .optional(),
+    pollAfterMs: z.number().int().min(1).max(300_000).optional(),
+  })
+  .strict()
+  .superRefine((interaction, context) => {
+    if (
+      interaction.confirmation &&
+      (interaction.fields.length !== 0 ||
+        interaction.pollAfterMs !== undefined ||
+        interaction.choices.length !== 2 ||
+        interaction.choices[0]?.id !== "yes" ||
+        interaction.choices[1]?.id !== "no")
+    )
+      context.addIssue({ code: "custom", message: "invalid confirmation" });
+    const ids = [
+      ...interaction.fields.map((field) => field.id),
+      ...interaction.choices.map((choice) => choice.id),
+    ];
+    if (new Set(ids).size !== ids.length)
+      context.addIssue({ code: "custom", message: "duplicate ids" });
+    if (
+      interaction.fields.length === 0 &&
+      interaction.choices.length === 0 &&
+      interaction.pollAfterMs === undefined
+    )
+      context.addIssue({
+        code: "custom",
+        message: "interaction cannot answer",
+      });
+  });
 export type AuthInteraction = z.infer<typeof interactionSchema>;
 
 export const responseSchema = z.discriminatedUnion("kind", [

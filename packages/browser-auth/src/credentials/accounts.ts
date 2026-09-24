@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import type { FormProposal } from "../agent/proposals.js";
+import type { CredentialPlan } from "../agent/proposals.js";
 import type { BrowserSurface } from "../browser/observation.js";
 import type { FlowChannel } from "../flow/interaction.js";
-import type { AuthInteraction, AuthResult } from "../protocol.js";
+import type { AuthConfirmation, AuthResult } from "../protocol.js";
 import { AuthFailure, abortable } from "../errors.js";
 import type { Redactor } from "../security/redaction.js";
 import { credentialValues, toCredentials } from "./store.js";
@@ -10,12 +10,16 @@ import type { CredentialStore, SavedLogin, Credentials } from "./store.js";
 
 export async function confirm(
   flow: FlowChannel,
-  confirmation: Extract<AuthInteraction, { kind: "confirm" }>["confirmation"],
+  confirmation: AuthConfirmation,
   signal: AbortSignal,
 ): Promise<boolean> {
   const answer = await flow.ask(
     {
-      kind: "confirm",
+      message:
+        confirmation.kind === "use-credentials"
+          ? "Approve credential destination"
+          : "Save credentials?",
+      fields: [],
       confirmation,
       choices: [
         { id: "yes", label: "Yes" },
@@ -77,7 +81,6 @@ export class AccountSession {
     if (!accounts.length) return;
     const answer = await this.flow.ask(
       {
-        kind: "form",
         message: "Choose a saved login",
         fields: [],
         choices: [
@@ -108,7 +111,7 @@ export class AccountSession {
   }
 
   async fill(
-    proposal: FormProposal,
+    proposal: CredentialPlan,
     surface: BrowserSurface,
   ): Promise<{ message: string; back: boolean; progressed: boolean }> {
     if (
@@ -156,7 +159,7 @@ export class AccountSession {
     const choices = proposal.choices.map((choice) => ({
       id: choice.elementId,
       label: this.redactor.text(choice.label),
-      ...(choice.back ? { kind: "back" as const } : {}),
+      ...(choice.intent === "back" ? { kind: "back" as const } : {}),
     }));
     // Known credentials must not leave a choices-only screen with no way to submit.
     if (!missing.length && bindings.length && choices.length)
@@ -167,7 +170,7 @@ export class AccountSession {
     if (missing.length || choices.length) {
       const answer = await this.flow.ask(
         {
-          kind: "form",
+          message: this.redactor.text(proposal.message),
           fields: missing.map(({ field }) => ({
             id: field.elementId,
             label: this.redactor.text(field.label),
@@ -233,23 +236,34 @@ export class AccountSession {
       await surface.validate(binding.field.elementId, this.signal);
     if (proposal.submitElementId)
       await surface.validate(proposal.submitElementId, this.signal);
-    for (const { field, origin, value, storedValue } of bindings) {
-      this.attempted.add(`${origin}:${field.key}`);
-      await surface.fill(field.elementId, value!, origin, this.signal);
-      if (value !== undefined && value === storedValue)
-        this.usedSavedRecord = true;
-      // Conservatively persist only known durable fields, never arbitrary model-labeled text.
-      if (
-        field.type !== "code" &&
-        ["username", "email", "phone", "password"].includes(field.key)
-      ) {
-        const values = this.submitted.get(origin) ?? {};
-        values[field.key] = value!;
-        this.submitted.set(origin, values);
+    let filledAny = false;
+    try {
+      for (const { field, origin, value, storedValue } of bindings) {
+        this.attempted.add(`${origin}:${field.key}`);
+        await surface.fill(field.elementId, value!, origin, this.signal);
+        filledAny = true;
+        if (value !== undefined && value === storedValue)
+          this.usedSavedRecord = true;
+        // Conservatively persist only known durable fields, never arbitrary model-labeled text.
+        if (
+          field.type !== "code" &&
+          ["username", "email", "phone", "password"].includes(field.key)
+        ) {
+          const values = this.submitted.get(origin) ?? {};
+          values[field.key] = value!;
+          this.submitted.set(origin, values);
+        }
       }
+      if (proposal.submitElementId)
+        await surface.click(proposal.submitElementId, this.signal);
+    } catch (error) {
+      if (filledAny)
+        throw new AuthFailure(
+          "partial_write",
+          "Credential entry was interrupted after a browser write; do not replay the attempt",
+        );
+      throw error;
     }
-    if (proposal.submitElementId)
-      await surface.click(proposal.submitElementId, this.signal);
     return {
       message: bindings.length
         ? "Entered credentials in an observed form"

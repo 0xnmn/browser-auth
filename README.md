@@ -8,7 +8,7 @@ Human-supervised sign-in for an **existing Chromium browser**. A TypeScript SDK,
 
 - Mid-workflow reauthentication via a CDP endpoint and website URL, with an optional standard CDP target ID for precise tab selection. Existing cookies, tabs, and context are preserved.
 - Partial initial username/email/phone/password/custom fields; prompt only for missing or previously attempted values. No credential values in agent proposals.
-- Multiple saved logins per website, automatic account discovery, exact-origin credential associations, and native account selection that offers discovered existing accounts and add-account choices together.
+- Multiple saved logins per website, exact-origin credential associations, and controller-validated native account choices such as switch, add, logout, and finish.
 - Multi-step forms, website Back/SSO choices, manually entered verification codes, and external waits for a human to complete passkeys, magic links, or CAPTCHAs **in the browser**. These are not automatic challenge solvers.
 - Logout, independent credential deletion, `save: "yes" | "ask" | "never"`, single-use responses, abort signals, safe errors, and opt-in OTLP traces.
 
@@ -53,27 +53,9 @@ const flow = auth.login({
   signal: cancellation.signal,
 });
 
-// Forward updates to your UI; send its answers back with flow.respond(response).
-// Do not await the result before arranging an interaction consumer.
+// Forward every generic interaction to your UI; send its answer back with
+// flow.respond(response). Do not await result before consuming interactions.
 for await (const snapshot of flow.updates()) {
-  // This example explicitly keeps an existing session. Applications may instead
-  // render every session choice so the user can log out or change accounts.
-  if (
-    snapshot.status === "waiting" &&
-    snapshot.interaction.kind === "session"
-  ) {
-    const finish = snapshot.interaction.choices.find(
-      (choice) => choice.kind === "finish",
-    );
-    if (finish) {
-      await flow.respond({
-        kind: "choose",
-        interactionId: snapshot.interaction.id,
-        choiceId: finish.id,
-      });
-      continue;
-    }
-  }
   // Render synchronously; replace the previous prompt when snapshots change.
   yourUi.render(snapshot, {
     onRespond: (response: AuthResponse) => flow.respond(response),
@@ -83,9 +65,9 @@ for await (const snapshot of flow.updates()) {
 const result = await flow.result;
 ```
 
-The `cdpUrl` and `yourUi` variables above belong to the host application. Replace `your-model-name` with a model supported by your provider. For external challenges, keep consuming updates while a prompt is open: it can expire or be replaced. Cancel/clear the old UI on replacement and never replay responses. The bundled CLI and React panel handle this lifecycle; `useAuthFlow` connects the panel to a host-supplied transport.
+The `cdpUrl` and `yourUi` variables above belong to the host application. Replace `your-model-name` with a model supported by your provider. A waiting snapshot always has the same public shape: `{ id, message, fields, choices, confirmation?, pollAfterMs? }`. Submit fields with `{ kind: "submit", interactionId, values }` or select a choice with `{ kind: "choose", interactionId, choiceId }`. `pollAfterMs` means the controller may replace the interaction after polling; it is not a separate external-interaction type. Keep consuming updates while any prompt is open, clear replaced UI, and never replay responses. The bundled CLI and React panel handle this lifecycle; `useAuthFlow` connects the panel to a host-supplied transport.
 
-Every call to `login` starts one flow. If the browser already has a signed-in session, the agent explores native account menus and nested lists internally before emitting a `session` interaction. Public choices represent authentication decisions only: `finish`, `logout`, `switch` to a specific account, and `add`. The controller always includes `finish`. Menu opening and expansion never require a response. Available actions depend on the website; discovery never selects an account or logs out as a fallback. Respond with the usual `{ kind: "choose", interactionId, choiceId }` to continue the same flow.
+Every call to `login` starts one flow. The agent is instructed to explore native account menus before offering account actions; account/provider/method decisions become ordinary public `choices`. Choice `kind` is optional metadata such as `finish`, `logout`, `switch`, `add`, or `back`; render unknown or absent kinds generically. The controller validates captured controls before acting and never selects an account or logs out as a fallback. Confirmations use the same interaction shape and are controller-authored only for credential destination and saving consent.
 
 ```ts
 const target = { cdpUrl, url: "https://service.example" };
@@ -127,7 +109,7 @@ const auth = createAuth({
 });
 ```
 
-The SDK owns the agent loop, observations, and action validation; custom agents and proposal parsers are not public APIs. The internal model adapter uses structured output, no automatic model retries, and disables its telemetry. Configuration modules are trusted same-process code, not sandboxed plugins. Longer external challenges may need larger limits; polling consumes steps.
+The SDK owns the agent loop, observations, and action validation; custom agents and proposal parsers are not public APIs. The internal model adapter exposes named AI SDK tools generated from the private proposal schema, requires exactly one tool call, performs no automatic model retries, and disables AI SDK telemetry. The tools have schemas but no execute callbacks: the controller interprets accepted proposals. Alongside bounded page actions, tools can list/switch/create/close flow-scoped tabs and list observed frames. Tab and frame metadata contains opaque IDs, origins, and provenance—not URLs or titles; only tabs created by the flow can be closed. There is one `ask_user` proposal with field bindings, native choices, a submit reference, and an `external` boolean; these private proposal details are normalized to the generic public interaction above. Configuration modules are trusted same-process code, not sandboxed plugins. Longer human challenges may need larger limits; polling consumes steps.
 
 Model configuration is a discriminated union with common `{ model, apiKey?, baseURL?, headers? }` fields. It mirrors a focused subset of AI SDK provider settings with package-owned types; no provider-library imports are needed.
 
@@ -140,7 +122,7 @@ Model configuration is a discriminated union with common `{ model, apiKey?, base
 
 `baseURL` is the HTTP(S) API root, **not** the full operation URL: e.g. `https://proxy.example/v1`, to which the adapter appends `/responses`, `/chat/completions`, or `/messages`. Gateway uses its own AI SDK protocol, not Chat Completions; use `openai-compatible` for a chat-compatible proxy. Keep endpoint configuration server-side and trusted: the selected endpoint and upstream providers receive page observations. Never put private keys in frontend code or logs.
 
-OpenAI/Anthropic use their standard endpoints and `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` if `apiKey` is omitted; Gateway supports `AI_GATEWAY_API_KEY`. Compatible endpoints must support JSON output; set `supportsStructuredOutputs: true` only when they support JSON Schema response formats. It defaults to JSON-object output, with local proposal validation in either mode.
+OpenAI/Anthropic use their standard endpoints and `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` if `apiKey` is omitted; Gateway supports `AI_GATEWAY_API_KEY`. Compatible endpoints must support AI SDK tool calls; set `supportsStructuredOutputs: true` only when they support JSON Schema response formats. Every returned tool input is validated locally against the proposal schema.
 
 Gateway routing uses the AI SDK field names: `order` is provider preference, `only` restricts eligible providers, and `models` lists fallback **model IDs**, not providers. Omit unused lists; supplied lists must be nonempty. Routing is performed by Gateway, not by retrying authentication or browser actions. Direct providers do not accept Gateway routing options.
 
@@ -179,7 +161,7 @@ browser-auth accounts remove --id ACCOUNT --config ./auth.config.mjs
 
 From this checkout: `pnpm cli --help` or `pnpm cli login https://service.example --config ./auth.config.mjs` (no build required). The CLI defaults to CDP at `http://127.0.0.1:9222`; start Chrome with remote debugging enabled and a separate profile first. It does not launch a browser or scan ports. Saving defaults to `ask`. The SDK still requires an explicit `cdpUrl`. Passwords/codes are masked. Ctrl+C cancels. Exit codes: 0 success, 1 runtime/configuration/input failure or unknown outcome or save/delete failure, 2 invalid command syntax, 130 cancellation before browser mutation. By default, saved credentials disappear when the CLI process exits; cross-invocation reuse requires a host-provided persistent store. Account commands do not require CDP; listing also supports `--credential-origin` and returns metadata only.
 
-The only browser command is `login`; there is no `--action` option. Both interactive and JSON modes expose the same `session` interaction and wait for an explicit choice. The CLI does not silently select `finish`. JSON clients continue the flow by writing a normal choose response to stdin.
+The only browser command is `login`; there is no `--action` option. Interactive and JSON modes expose the same generic interaction and wait for an explicit response. The CLI does not silently select `finish`. JSON clients continue the flow with the unchanged submit or choose response shapes.
 
 All operation options are accepted through `--input /private/options.json`: `cdpUrl`, `url`, `cdpHeaders`, `targetId`, partial `credentials`, `accountId`, and the operation's save/label/forget options. Only fields valid for that operation are accepted. Keep secret files out of Git and readable only by the owner; this is input transport, not a credential file store. Explicit flags override file fields. CDP precedence is `--cdp` → input-file `cdpUrl` → `BROWSER_AUTH_CDP_URL` → `http://127.0.0.1:9222`. `--target-id` selects a specific tab. Model configuration, stores, limits, and tracing work through the same `AuthOptions` configuration as the SDK.
 
@@ -198,7 +180,7 @@ In `--json` mode, command-syntax, configuration, input, and account-operation er
 
 ## Optional React and tracing
 
-`@browser-auth/react` exports `AuthPanel` and `useAuthFlow`. Import `@browser-auth/react/styles.css` separately. Pass a snapshot, an async `onRespond`, and optional `onCancel`; or subscribe using a transport with `updates()` and `respond()`. Secret inputs are uncontrolled and cleared on submission or interaction replacement. The package does not ship a network server. Your host must authenticate/authorize the transport, prevent CSRF/replay, bound request sizes, and keep credentials out of request logs. Validate wire data with `parseSnapshot`, `parseResponse`, `parseInteraction`, or `parseResult` from `@browser-auth/core/protocol`. They accept `unknown` and return package-owned types, throwing fixed errors on invalid data. No schema-library objects are public.
+`@browser-auth/react` exports `AuthPanel` and `useAuthFlow`. Import `@browser-auth/react/styles.css` separately. Pass a snapshot, an async `onRespond`, and optional `onCancel`; or subscribe using a transport with `updates()` and `respond()`. The panel renders the generic `fields`, `choices`, `confirmation`, and polling states rather than branching on interaction kinds. Secret inputs are uncontrolled and cleared on submission or interaction replacement. The package does not ship a network server. Your host must authenticate/authorize the transport, prevent CSRF/replay, bound request sizes, and keep credentials out of request logs. Validate wire data with `parseSnapshot`, `parseResponse`, `parseInteraction`, or `parseResult` from `@browser-auth/core/protocol`. They accept `unknown` and return package-owned types, throwing fixed errors on invalid data. No schema-library objects are public.
 
 ```ts
 import { createOtlpTracing } from "@browser-auth/core/tracing";
@@ -212,9 +194,9 @@ Tracing is off by default. The helper creates a private provider and does not re
 
 ## Boundaries and current limitations
 
-Stale session choices are consumed and refreshed within the same flow, never replayed. Session freshness is a conservative document/text check, not server-side verification. SSO popups can return observation to the service page even if they remain open; no popup is closed by the SDK. Outcomes still depend on model interpretation, including whether Back stays inside a credential attempt or returns to session selection.
+Stale choices are consumed and refreshed within the same flow, never replayed. Freshness is a conservative document/text and captured-handle check, not server-side verification. The model receives a bounded DOM-hierarchy observation with SDK-owned element references. Screenshots mask editable controls before any private value is known and are withheld once `Redactor.hasValues` is true. This reduces accidental exposure; it is not perfect secrecy. SSO popups can return observation to the service page even if they remain open; no popup is closed by the SDK. Outcomes still depend on model interpretation.
 
-See [SECURITY.md](SECURITY.md). There is no guarantee of support for every website. Routine sign-in navigation and continuation clicks run without confirmation; provider, account and authentication-method decisions remain user choices. SPA controls not associated with an actual HTML form need a fill-only proposal followed by a click; the default agent can still misclassify them. Native switching/adding never falls back to logout. Popup and iframe handling is bounded and best-effort. External challenges require access to the original browser; there is no remote-desktop stream. Recovery/enrollment, automatic TOTP, credential imports, password managers, encrypted file stores, and session revocation across devices are outside v1.
+See [SECURITY.md](SECURITY.md) and the [design plan](docs/design.md). There is no guarantee of support for every website. The model has no cookie, storage, network, arbitrary-JavaScript, or direct secret tool; private field filling and native-choice dispatch remain controller operations. That does not protect pre-existing browser data from observation or credentials from a hostile destination page. Routine sign-in navigation and continuation clicks run without confirmation; provider, account and authentication-method decisions remain user choices. This is a bounded authentication controller, not full agent-browser parity. Popup, tab, and iframe handling is bounded to the initially selected page, observed descendant popups, and flow-created pages; unrelated caller tabs are never listed. Native JavaScript dialogs are unsupported: they are dismissed without accepting or providing values, and the flow stops with `unknown`; inspect the session before retrying. Human challenges require access to the original browser; there is no remote-desktop stream. Recovery/enrollment, automatic TOTP, credential imports, password managers, encrypted file stores, and session revocation across devices are outside v1.
 
 ## Layout and contributing
 

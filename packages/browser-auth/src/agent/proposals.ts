@@ -1,31 +1,41 @@
+import type {
+  BrowserAction,
+  BrowserObservation,
+} from "../browser/observation.js";
+
 export interface ProposedChoice {
   elementId: string;
   label: string;
-  back: boolean;
+  intent: "continue" | "back" | "switch" | "add" | "logout" | "finish";
 }
+
+/** Private field bindings are executed by the controller, never by model code. */
+export interface CredentialPlan {
+  kind: "ask_user";
+  message: string;
+  fields: Array<{
+    elementId: string;
+    key: string;
+    label: string;
+    type: "text" | "email" | "phone" | "password" | "code";
+    rejected: boolean;
+  }>;
+  choices: ProposedChoice[];
+  submitElementId: string | null;
+  external: boolean;
+}
+
 export type AuthProposal =
-  | {
-      kind: "session";
-      choices: Array<{
-        elementId: string;
-        label: string;
-        kind: "logout" | "switch" | "add" | "accounts";
-      }>;
-    }
-  | { kind: "click"; elementId: string }
-  | {
-      kind: "form";
-      fields: Array<{
-        elementId: string;
-        key: string;
-        label: string;
-        type: "text" | "email" | "phone" | "password" | "code";
-        rejected: boolean;
-      }>;
-      choices: ProposedChoice[];
-      submitElementId: string | null;
-    }
-  | { kind: "external"; message: string; choices: ProposedChoice[] }
+  | BrowserAction
+  | CredentialPlan
+  | { kind: "observe" }
+  | { kind: "screenshot" }
+  | { kind: "opener" }
+  | { kind: "tabs_list" }
+  | { kind: "tab_switch"; pageId: string }
+  | { kind: "tab_new" }
+  | { kind: "tab_close"; pageId: string }
+  | { kind: "frames_list" }
   | {
       kind: "done";
       outcome:
@@ -35,34 +45,18 @@ export type AuthProposal =
         | "unsupported"
         | "not-signed-in"
         | "rejected";
-    }
-  | { kind: "opener" }
-  | { kind: "wait" };
-export type FormProposal = Extract<AuthProposal, { kind: "form" }>;
+    };
 
-export interface ObservedElement {
-  id: string;
-  origin: string;
-  tag: string;
-  type: string;
-  label: string;
-  autocomplete: string;
-  expanded?: boolean;
-}
-
-export interface AuthObservation {
+export interface AuthObservation extends Omit<BrowserObservation, "tree"> {
+  tree?: string;
   operation: "login" | "logout" | "choose-account";
-  /** Completed actions, never credential values. */
   history?: string[];
-  /** Read-only service-page evidence while observing a popup. */
   opener?: { origin: string; text: string };
-  origin: string;
-  text: string;
-  elements: ObservedElement[];
+  context?: string;
   availableCredentialKeys: string[];
 }
 
-/** Internal reasoning boundary. Proposals are validated before execution. */
+/** Internal reasoning boundary. No browser handles or private values. */
 export interface AuthAgent {
   next(
     observation: AuthObservation,

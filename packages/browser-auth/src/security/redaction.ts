@@ -6,6 +6,10 @@ export class Redactor {
     if (value) this.values.add(value);
   }
 
+  get hasValues(): boolean {
+    return this.values.size > 0;
+  }
+
   text(value: string): string {
     let result = value;
     for (const secret of [...this.values].sort((a, b) => b.length - a.length)) {

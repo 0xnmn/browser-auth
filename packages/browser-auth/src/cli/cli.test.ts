@@ -140,7 +140,7 @@ describe("runCli", () => {
       status: "waiting" as const,
       interaction: {
         id: "i",
-        kind: "form" as const,
+        message: "Enter credentials",
         fields: [
           {
             id: "p",
@@ -192,8 +192,8 @@ describe("runCli", () => {
       status: "waiting",
       interaction: {
         id: "old",
-        kind: "external",
         message: "Old",
+        fields: [],
         choices: [{ id: "old-choice", label: "Continue" }],
       },
     });
@@ -205,8 +205,8 @@ describe("runCli", () => {
       status: "waiting",
       interaction: {
         id: "new",
-        kind: "external",
         message: "New",
+        fields: [],
         choices: [{ id: "new-choice", label: "Continue" }],
       },
     });
@@ -238,9 +238,10 @@ describe("runCli", () => {
       status: "waiting",
       interaction: {
         id: "empty",
-        kind: "external",
         message: "Scan the code",
+        fields: [],
         choices: [],
+        pollAfterMs: 1000,
       },
     });
     await vi.waitFor(() =>
@@ -263,7 +264,7 @@ describe("runCli", () => {
       status: "waiting",
       interaction: {
         id: "form",
-        kind: "form",
+        message: "Enter details",
         fields: [
           {
             id: "password",
@@ -307,7 +308,8 @@ describe("runCli", () => {
       status: "waiting",
       interaction: {
         id: "confirm",
-        kind: "confirm",
+        message: "Allow credentials?",
+        fields: [],
         confirmation: {
           kind: "use-credentials",
           origin: "https://identity.example",
@@ -340,7 +342,8 @@ describe("runCli", () => {
       status: "waiting",
       interaction: {
         id: "session",
-        kind: "session",
+        message: "Already signed in. How would you like to proceed?",
+        fields: [],
         choices: [
           { id: "done", label: "Keep using this account", kind: "finish" },
           { id: "native-logout", label: "Sign out here", kind: "logout" },
@@ -489,7 +492,7 @@ describe("runCli", () => {
     vi.mocked(h.deps.prompts!.secret).mockResolvedValue("x".repeat(8193));
     const pending = channel.ask(
       {
-        kind: "form",
+        message: "Enter password",
         fields: [
           { id: "secret", label: "Password", type: "password", required: true },
         ],

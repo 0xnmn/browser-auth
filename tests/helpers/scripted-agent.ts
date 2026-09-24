@@ -22,36 +22,64 @@ export class FixtureAgent implements AuthAgent {
         ? { kind: "click", elementId: signOut.id }
         : { kind: "done", outcome: "unsupported" };
     }
-    if (operation === "choose-account") {
+    if (operation === "choose-account" || text.includes("Choose account")) {
       if (text.includes("Sign in") && !text.includes("Signed in"))
         return { kind: "done", outcome: "not-signed-in" };
       if (text.includes("Switched") || text.includes("Added account"))
         return { kind: "done", outcome: "account-changed" };
       if (text.includes("Choose account"))
         return {
-          kind: "session",
-          choices: elements
-            .filter((element) => element.tag === "a")
-            .map((element) => ({
-              elementId: element.id,
-              label: element.label,
-              kind:
-                element.label === "Sign out"
-                  ? "logout"
-                  : element.label === "Add another account"
-                    ? "add"
-                    : "switch",
-            })),
+          kind: "ask_user",
+          message: "Choose an account",
+          fields: [],
+          choices: [
+            {
+              elementId: "finish",
+              label: "Keep using this account",
+              intent: "finish",
+            },
+            ...elements
+              .filter((element) => element.tag === "a")
+              .map((element) => ({
+                elementId: element.id,
+                label: element.label,
+                intent:
+                  element.label === "Sign out"
+                    ? ("logout" as const)
+                    : element.label === "Add another account"
+                      ? ("add" as const)
+                      : ("switch" as const),
+              })),
+          ],
+          submitElementId: null,
+          external: false,
         };
       if (!text.includes("Add another account")) {
         const nativeControl = byLabel("Switch account");
         if (!nativeControl && text.includes("Dashboard")) {
           const logout = byLabel("Sign out");
           return {
-            kind: "session",
-            choices: logout
-              ? [{ elementId: logout.id, label: logout.label, kind: "logout" }]
-              : [],
+            kind: "ask_user",
+            message: "Choose an account",
+            fields: [],
+            choices: [
+              {
+                elementId: "finish",
+                label: "Keep using this account",
+                intent: "finish",
+              },
+              ...(logout
+                ? [
+                    {
+                      elementId: logout.id,
+                      label: logout.label,
+                      intent: "logout" as const,
+                    },
+                  ]
+                : []),
+            ],
+            submitElementId: null,
+            external: false,
           };
         }
         return nativeControl
@@ -66,29 +94,43 @@ export class FixtureAgent implements AuthAgent {
         text.includes("Added account")) &&
       history.length === 0
     ) {
-      const kinds = new Map<string, "logout" | "accounts" | "add">([
-        ["Sign out", "logout"],
-        ["Switch account", "accounts"],
-        ["Add account", "add"],
-      ] as const);
+      const accountMenu = byLabel("Switch account");
+      if (accountMenu) return { kind: "click", elementId: accountMenu.id };
       return {
-        kind: "session",
-        choices: elements
-          .filter((element) => kinds.has(element.label))
-          .map((element) => ({
-            elementId: element.id,
-            label: element.label,
-            kind: kinds.get(element.label)!,
-          })),
+        kind: "ask_user",
+        message: "Choose an account",
+        fields: [],
+        choices: [
+          {
+            elementId: "finish",
+            label: "Keep using this account",
+            intent: "finish",
+          },
+          ...elements
+            .filter((element) =>
+              ["Sign out", "Add account"].includes(element.label),
+            )
+            .map((element) => ({
+              elementId: element.id,
+              label: element.label,
+              intent:
+                element.label === "Sign out"
+                  ? ("logout" as const)
+                  : ("add" as const),
+            })),
+        ],
+        submitElementId: null,
+        external: false,
       };
     }
     if (text.includes("Dashboard") || text.includes("Switched"))
       return { kind: "done", outcome: "authenticated" };
     const fields = elements.filter((element) => element.tag === "input");
-    if (!fields.length) return { kind: "wait" };
+    if (!fields.length) return { kind: "wait", milliseconds: 150 };
     const submit = elements.find((element) => element.tag === "button");
     return {
-      kind: "form",
+      kind: "ask_user",
+      message: "Enter details",
       fields: fields.map((element) => {
         const key = element.label.trim().toLowerCase();
         return {
@@ -111,9 +153,10 @@ export class FixtureAgent implements AuthAgent {
         .map((element) => ({
           elementId: element.id,
           label: "Back",
-          back: true,
+          intent: "back",
         })),
       submitElementId: submit?.id ?? null,
+      external: false,
     };
   }
 }

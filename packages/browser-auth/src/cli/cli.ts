@@ -232,18 +232,7 @@ async function answer(
   prompts: CliPrompts,
   signal: AbortSignal,
 ): Promise<AuthResponse> {
-  if (interaction.kind === "session") {
-    const choiceId = await prompts.select(
-      "Already signed in. How would you like to proceed?",
-      interaction.choices.map((choice) => ({
-        name: choice.label,
-        value: choice.id,
-      })),
-      signal,
-    );
-    return { kind: "choose", interactionId: interaction.id, choiceId };
-  }
-  if (interaction.kind === "confirm") {
+  if (interaction.confirmation) {
     const messages = {
       "use-credentials": `Allow credentials to be used for ${interaction.confirmation.kind === "use-credentials" ? interaction.confirmation.origin : "this website"}?`,
       "save-credentials": "Save these credentials?",
@@ -252,8 +241,9 @@ async function answer(
       messages[interaction.confirmation.kind],
       signal,
     );
-    const choice =
-      interaction.choices[accepted ? 0 : 1] ?? interaction.choices[0];
+    const choice = interaction.choices.find(
+      (entry) => entry.id === (accepted ? "yes" : "no"),
+    );
     if (!choice) throw new Error("invalid_interaction");
     return {
       kind: "choose",
@@ -261,12 +251,12 @@ async function answer(
       choiceId: choice.id,
     };
   }
-  if (interaction.kind === "form" && interaction.fields.length) {
+  if (interaction.fields.length) {
     if (interaction.choices.length) {
       let enter = "\0enter-details";
       while (interaction.choices.some((c) => c.id === enter)) enter += "-";
       const choice = await prompts.select(
-        interaction.message ?? "Choose an action",
+        interaction.message,
         [
           { name: "Enter details", value: enter },
           ...interaction.choices.map((c) => ({ name: c.label, value: c.id })),
@@ -297,12 +287,9 @@ async function answer(
       } while (field.required && !values[field.id]);
     return { kind: "submit", interactionId: interaction.id, values };
   }
-  if (interaction.kind === "external" && !interaction.choices.length)
-    throw new Error("no_external_choices");
+  if (!interaction.choices.length) throw new Error("no_available_choices");
   const choiceId = await prompts.select(
-    interaction.kind === "external"
-      ? interaction.message
-      : (interaction.message ?? "Choose an action"),
+    interaction.message,
     interaction.choices.map((c) => ({ name: c.label, value: c.id })),
     signal,
   );
@@ -339,7 +326,7 @@ async function renderInteractive(
           cleanup,
         };
         if (
-          snapshot.interaction.kind === "external" &&
+          !snapshot.interaction.fields.length &&
           !snapshot.interaction.choices.length
         ) {
           await writeOutput(

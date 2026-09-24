@@ -416,8 +416,9 @@ it.each(["interactive", "accounts", "waiting"])(
     let pending: Promise<unknown> | undefined;
     if (mode === "waiting") {
       pending = h.channel.ask(
-        { kind: "external", message: "Waiting", choices: [] },
+        { message: "Waiting", fields: [], choices: [] },
         new AbortController().signal,
+        10_000,
       );
     }
     expect(await runCli(args, h.deps)).toBe(1);
@@ -450,8 +451,9 @@ it.each(["waiting", "done"])(
     const pending =
       status === "waiting"
         ? h.channel.ask(
-            { kind: "external", message: "Waiting", choices: [] },
+            { message: "Waiting", fields: [], choices: [] },
             new AbortController().signal,
+            10_000,
           )
         : undefined;
     if (status === "done")
@@ -481,7 +483,7 @@ it("roundtrips JSONL responses with split UTF-8, rejects replay, and never echoe
   const h = harness();
   const response = h.channel.ask(
     {
-      kind: "form",
+      message: "Enter password",
       fields: [
         { id: "p", label: "Password", type: "password", required: true },
       ],
@@ -524,7 +526,8 @@ it("roundtrips a JSON session choice without implicitly finishing", async () => 
   const h = harness();
   const response = h.channel.ask(
     {
-      kind: "session",
+      message: "Choose an account",
+      fields: [],
       choices: [
         { id: "finish-current", label: "Continue", kind: "finish" },
         { id: "website-switch", label: "Choose another", kind: "switch" },
@@ -533,7 +536,9 @@ it("roundtrips a JSON session choice without implicitly finishing", async () => 
     new AbortController().signal,
   );
   const run = runCli(jsonArgs, h.deps);
-  await vi.waitFor(() => expect(h.output()).toContain('"kind":"session"'));
+  await vi.waitFor(() =>
+    expect(h.output()).toContain('"message":"Choose an account"'),
+  );
   const waiting = JSON.parse(h.output().trim());
   const choice = {
     kind: "choose" as const,
@@ -552,8 +557,9 @@ it.each(["cancel", "invalid", "oversized", "eof", "error"])(
   async (kind) => {
     const h = harness();
     const pending = h.channel.ask(
-      { kind: "external", message: "Waiting", choices: [] },
+      { message: "Waiting", fields: [], choices: [] },
       new AbortController().signal,
+      10_000,
     );
     const run = runCli(jsonArgs, h.deps);
     await vi.waitFor(() => expect(h.output()).toContain('"waiting"'));

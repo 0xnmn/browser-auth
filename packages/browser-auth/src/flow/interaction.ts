@@ -8,11 +8,7 @@ import type {
   AuthSnapshot,
 } from "../protocol.js";
 
-type InteractionInput = AuthInteraction extends infer T
-  ? T extends AuthInteraction
-    ? Omit<T, "id">
-    : never
-  : never;
+type InteractionInput = Omit<AuthInteraction, "id" | "pollAfterMs">;
 
 /** One pending interaction; each subscriber owns a bounded snapshot queue. */
 export class FlowChannel implements AuthFlow {
@@ -84,7 +80,11 @@ export class FlowChannel implements AuthFlow {
     signal.throwIfAborted();
     if (this.snapshot.status === "done") throw new Error("flow_completed");
     if (this.pending) throw new Error("An interaction is already pending");
-    const interaction = parseInteraction({ ...input, id: randomUUID() });
+    const interaction = parseInteraction({
+      ...input,
+      id: randomUUID(),
+      ...(pollMs !== undefined ? { pollAfterMs: pollMs } : {}),
+    });
     return new Promise((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
@@ -120,8 +120,7 @@ export class FlowChannel implements AuthFlow {
       )
         throw new Error("invalid_choice");
     } else {
-      if (interaction.kind !== "form" || interaction.fields.length === 0)
-        throw new Error("invalid_fields");
+      if (interaction.fields.length === 0) throw new Error("invalid_fields");
       const ids = new Set(interaction.fields.map((field) => field.id));
       if (Object.keys(response.values).some((id) => !ids.has(id)))
         throw new Error("invalid_fields");

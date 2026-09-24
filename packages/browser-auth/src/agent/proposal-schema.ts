@@ -1,40 +1,17 @@
 import { z } from "zod";
 
 const reference = z.string().min(1).max(100);
-const proposedChoice = z
-  .object({
-    elementId: reference,
-    label: z.string().max(160),
-    back: z.boolean(),
-  })
-  .strict();
-
+const element = { elementId: reference };
 export const proposalSchema = z.discriminatedUnion("kind", [
   z
     .object({
-      kind: z.literal("session"),
-      choices: z
-        .array(
-          z
-            .object({
-              elementId: reference,
-              label: z.string().max(160),
-              kind: z.enum(["logout", "switch", "add", "accounts"]),
-            })
-            .strict(),
-        )
-        .max(20),
-    })
-    .strict(),
-  z.object({ kind: z.literal("click"), elementId: reference }).strict(),
-  z
-    .object({
-      kind: z.literal("form"),
+      kind: z.literal("ask_user"),
+      message: z.string().max(500),
       fields: z
         .array(
           z
             .object({
-              elementId: reference,
+              ...element,
               key: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
               label: z.string().max(160),
               type: z.enum(["text", "email", "phone", "password", "code"]),
@@ -43,17 +20,96 @@ export const proposalSchema = z.discriminatedUnion("kind", [
             .strict(),
         )
         .max(20),
-      choices: z.array(proposedChoice).max(20),
+      choices: z
+        .array(
+          z
+            .object({
+              ...element,
+              label: z.string().max(160),
+              intent: z.enum([
+                "continue",
+                "back",
+                "switch",
+                "add",
+                "logout",
+                "finish",
+              ]),
+            })
+            .strict(),
+        )
+        .max(20),
       submitElementId: reference.nullable(),
+      external: z.boolean(),
+    })
+    .strict(),
+  z.object({ kind: z.literal("click"), ...element }).strict(),
+  z.object({ kind: z.literal("doubleClick"), ...element }).strict(),
+  z.object({ kind: z.literal("hover"), ...element }).strict(),
+  z.object({ kind: z.literal("focus"), ...element }).strict(),
+  z
+    .object({
+      kind: z.literal("press"),
+      ...element,
+      key: z.enum([
+        "Enter",
+        "Tab",
+        "Escape",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+        "Space",
+      ]),
     })
     .strict(),
   z
     .object({
-      kind: z.literal("external"),
-      message: z.string().max(500),
-      choices: z.array(proposedChoice).max(20),
+      kind: z.literal("scroll"),
+      elementId: reference.optional(),
+      deltaX: z.number().min(-2000).max(2000).optional(),
+      deltaY: z.number().min(-2000).max(2000),
     })
     .strict(),
+  z
+    .object({ kind: z.literal("check"), ...element, checked: z.boolean() })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("select"),
+      ...element,
+      indices: z.array(z.number().int().min(0)).min(1).max(20),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("drag"),
+      sourceElementId: reference,
+      targetElementId: reference,
+    })
+    .strict(),
+  z.object({ kind: z.literal("navigate"), url: z.string().max(2048) }).strict(),
+  z.object({ kind: z.literal("back") }).strict(),
+  z.object({ kind: z.literal("forward") }).strict(),
+  z.object({ kind: z.literal("reload") }).strict(),
+  z
+    .object({
+      kind: z.literal("wait"),
+      milliseconds: z.number().int().min(0).max(5000),
+    })
+    .strict(),
+  z.object({ kind: z.literal("inspect"), ...element }).strict(),
+  z.object({ kind: z.literal("observe") }).strict(),
+  z.object({ kind: z.literal("screenshot") }).strict(),
+  z.object({ kind: z.literal("opener") }).strict(),
+  z.object({ kind: z.literal("tabs_list") }).strict(),
+  z.object({ kind: z.literal("tab_switch"), pageId: reference }).strict(),
+  z.object({ kind: z.literal("tab_new") }).strict(),
+  z.object({ kind: z.literal("tab_close"), pageId: reference }).strict(),
+  z.object({ kind: z.literal("frames_list") }).strict(),
   z
     .object({
       kind: z.literal("done"),
@@ -61,12 +117,10 @@ export const proposalSchema = z.discriminatedUnion("kind", [
         "authenticated",
         "signed-out",
         "account-changed",
-        "not-signed-in",
         "unsupported",
+        "not-signed-in",
         "rejected",
       ]),
     })
     .strict(),
-  z.object({ kind: z.literal("wait") }).strict(),
-  z.object({ kind: z.literal("opener") }).strict(),
 ]);

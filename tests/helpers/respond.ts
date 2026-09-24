@@ -7,15 +7,15 @@ import type {
 import { fixtureCode, fixturePassword } from "../fixtures/auth-site.js";
 
 export function defaultResponse(interaction: AuthInteraction): AuthResponse {
-  if (interaction.kind === "session") {
+  const finish = interaction.choices.find((choice) => choice.kind === "finish");
+  if (finish) {
     return {
       kind: "choose",
       interactionId: interaction.id,
-      choiceId: interaction.choices.find((choice) => choice.kind === "finish")!
-        .id,
+      choiceId: finish.id,
     };
   }
-  if (interaction.kind === "form" && interaction.fields.length) {
+  if (interaction.fields.length) {
     return {
       kind: "submit",
       interactionId: interaction.id,

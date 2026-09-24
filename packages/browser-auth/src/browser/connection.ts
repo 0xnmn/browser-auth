@@ -74,7 +74,6 @@ export async function connectTarget(
       );
       const answer = await flow.ask(
         {
-          kind: "form",
           message: "Choose the existing tab to authenticate",
           fields: [],
           choices,
