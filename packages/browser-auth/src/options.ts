@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { originOf } from "./security/origins.js";
 
 const headers = z.record(z.string(), z.string());
 const target = {
@@ -48,6 +49,11 @@ export function validateOperationOptions(
   operation: "login" | "logout" | "switch",
   value: unknown,
 ): void {
-  if (!schemas[operation].safeParse(value).success)
-    throw new Error(`invalid_${operation}_options`);
+  const parsed = schemas[operation].safeParse(value);
+  if (!parsed.success) throw new Error(`invalid_${operation}_options`);
+  try {
+    originOf(parsed.data.url);
+  } catch {
+    throw new Error("invalid_auth_url");
+  }
 }

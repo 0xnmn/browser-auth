@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { MockLanguageModelV4 } from "ai/test";
+import { APICallError, LoadAPIKeyError } from "ai";
 import { createModelAgent, createStructuredAgent } from "./ai-sdk-agent.js";
 import type { AuthObservation } from "./proposals.js";
 import type { ModelConfig } from "../types.js";
@@ -27,7 +28,7 @@ const modelFor = (text: string) =>
   });
 
 it("uses AI SDK structured generation and rejects actions outside the proposal contract", async () => {
-  const model = modelFor('{"kind":"wait"}');
+  const model = modelFor('{"proposal":{"kind":"wait"}}');
   expect(
     await createStructuredAgent(model).next(observation, {
       signal: new AbortController().signal,
@@ -35,14 +36,25 @@ it("uses AI SDK structured generation and rejects actions outside the proposal c
   ).toEqual({ kind: "wait" });
   expect(model.doGenerateCalls).toHaveLength(1);
   expect(model.doGenerateCalls[0]!.responseFormat?.type).toBe("json");
+  expect(model.doGenerateCalls[0]!.responseFormat).toMatchObject({
+    schema: {
+      type: "object",
+      required: ["proposal"],
+      additionalProperties: false,
+      properties: { proposal: { anyOf: expect.any(Array) } },
+    },
+  });
+  expect(
+    (model.doGenerateCalls[0]!.responseFormat as { schema: object }).schema,
+  ).not.toHaveProperty("anyOf");
   const forged = modelFor(
-    '{"kind":"evaluate","script":"fetch(document.cookie)"}',
+    '{"proposal":{"kind":"evaluate","script":"fetch(document.cookie)"}}',
   );
   await expect(
     createStructuredAgent(forged).next(observation, {
       signal: new AbortController().signal,
     }),
-  ).rejects.toThrow();
+  ).rejects.toMatchObject({ code: "model_output_invalid" });
   expect(forged.doGenerateCalls).toHaveLength(1);
 });
 
@@ -73,7 +85,10 @@ it.each([false, true])(
           choices: [
             {
               index: 0,
-              message: { role: "assistant", content: '{"kind":"wait"}' },
+              message: {
+                role: "assistant",
+                content: '{"proposal":{"kind":"wait"}}',
+              },
               finish_reason: "stop",
             },
           ],
@@ -181,7 +196,7 @@ it("forwards Gateway routing unchanged alongside model selection and endpoint he
     response.setHeader("content-type", "application/json");
     response.end(
       JSON.stringify({
-        content: [{ type: "text", text: '{"kind":"wait"}' }],
+        content: [{ type: "text", text: '{"proposal":{"kind":"wait"}}' }],
         finishReason: { unified: "stop" },
         usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } },
         warnings: [],
@@ -231,6 +246,54 @@ it("forwards Gateway routing unchanged alongside model selection and endpoint he
       server.closeAllConnections();
     });
   }
+});
+
+it.each([
+  [401, "model_access_denied"],
+  [403, "model_access_denied"],
+  [404, "model_not_found"],
+  [429, "model_rate_limited"],
+  [400, "model_request_rejected"],
+  [422, "model_request_rejected"],
+  [500, "model_request_failed"],
+] as const)(
+  "maps HTTP %s to safe error %s without retaining raw data",
+  async (statusCode, code) => {
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        throw new APICallError({
+          message: "private-error",
+          url: "https://private.endpoint",
+          requestBodyValues: { secret: "private-value" },
+          statusCode,
+          responseBody: "private-body",
+        });
+      },
+    });
+    const error = await createStructuredAgent(model)
+      .next(observation, { signal: new AbortController().signal })
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({ code });
+    expect(String(error) + JSON.stringify(error)).not.toContain("private");
+    expect(error).not.toHaveProperty("cause");
+    expect(model.doGenerateCalls).toHaveLength(1);
+  },
+);
+
+it("reports missing keys without leaking the SDK error", async () => {
+  const model = new MockLanguageModelV4({
+    doGenerate: async () => {
+      throw new LoadAPIKeyError({ message: "private-config" });
+    },
+  });
+  await expect(
+    createStructuredAgent(model).next(observation, {
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toMatchObject({
+    code: "model_key_missing",
+    message: expect.stringContaining("OPENAI_API_KEY"),
+  });
 });
 
 it.each([

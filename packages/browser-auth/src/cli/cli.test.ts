@@ -367,7 +367,7 @@ describe("runCli", () => {
     expect(h.error()).toBe("");
   });
 
-  it("sanitizes page-sourced terminal content and never prints raw failures", async () => {
+  it("sanitizes terminal content and displays the safe result error", async () => {
     const h = harness(
       flow([
         { status: "running", message: "safe\u001b[31m\nforged" },
@@ -375,7 +375,7 @@ describe("runCli", () => {
           status: "done",
           result: {
             status: "failed",
-            error: { code: "x", message: "page secret" },
+            error: { code: "model_key_missing", message: "Set OPENAI_API_KEY" },
           },
         },
       ]),
@@ -387,7 +387,7 @@ describe("runCli", () => {
       ),
     ).toBe(1);
     expect(h.output()).toBe("safe [31m forged\nfailed\n");
-    expect(h.output()).not.toContain("page secret");
+    expect(h.error()).toBe("model_key_missing: Set OPENAI_API_KEY\n");
   });
 
   it("rejects missing required arguments with fixed usage", async () => {

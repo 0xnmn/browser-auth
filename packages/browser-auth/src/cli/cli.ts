@@ -551,9 +551,17 @@ export async function runCli(
       : {};
     if (!fromFile || typeof fromFile !== "object" || Array.isArray(fromFile))
       throw new Error("invalid_input");
+    // Only positional hostnames get HTTPS shorthand; SDK/file URLs stay explicit.
+    const url =
+      args.url &&
+      /^(?:localhost|(?:[a-z0-9-]+\.)+[a-z0-9-]+)(?::\d+)?(?:[/?#]|$)/i.test(
+        args.url,
+      )
+        ? `https://${args.url}`
+        : args.url;
     const operation: Record<string, unknown> = {
       ...(fromFile as Record<string, unknown>),
-      ...(args.url ? { url: args.url } : {}),
+      ...(url ? { url } : {}),
       ...(args.values.get("--cdp") ? { cdpUrl: args.values.get("--cdp") } : {}),
       ...(args.values.get("--target-id")
         ? { targetId: args.values.get("--target-id") }
@@ -600,6 +608,10 @@ export async function runCli(
           "Could not connect to Chrome. Start Chrome with --remote-debugging-port=9222 and a separate --user-data-dir, or set --cdp / BROWSER_AUTH_CDP_URL to an existing browser endpoint.\n",
         );
       if (!args.json) deps.stdout.write(`${result.status}\n`);
+      if (!args.json && result.status === "failed")
+        deps.stderr.write(
+          `${safe(result.error.code)}: ${safe(result.error.message)}\n`,
+        );
       const failed =
         (result.status === "authenticated" &&
           result.save.status === "failed") ||
@@ -622,8 +634,12 @@ export async function runCli(
     } finally {
       process.removeListener("SIGINT", onInterrupt);
     }
-  } catch {
-    deps.stderr.write("browser-auth could not start safely.\n");
+  } catch (error) {
+    deps.stderr.write(
+      error instanceof Error && error.message === "invalid_auth_url"
+        ? "Invalid website URL. Use an HTTPS URL such as https://example.com, without embedded credentials. HTTP is allowed only for loopback development.\n"
+        : "browser-auth could not start safely.\n",
+    );
     return 1;
   }
 }

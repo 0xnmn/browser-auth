@@ -24,6 +24,19 @@ it("rejects library objects and invalid operation options before connecting", ()
   ).toThrow("Invalid model configuration");
 });
 
+it.each([
+  "google.com",
+  "not a URL",
+  "javascript:alert(1)",
+  "http://example.com",
+  "https://user:secret@example.com",
+])("rejects invalid website URL %s before starting a browser flow", (url) => {
+  const auth = createAuth({ model: { provider: "openai", model: "fixture" } });
+  expect(() => auth.login({ url, cdpUrl: "http://127.0.0.1:1" })).toThrow(
+    /^invalid_auth_url$/,
+  );
+});
+
 it("rejects removed custom-agent configurations, including ones with a valid model", () => {
   for (const model of [undefined, { provider: "openai", model: "fixture" }]) {
     expect(() =>

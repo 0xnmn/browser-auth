@@ -219,6 +219,38 @@ it.each([false, true])(
   },
 );
 
+it.each([
+  ["google.com", "https://google.com"],
+  [
+    "login.example.com:8443/sign-in?next=home",
+    "https://login.example.com:8443/sign-in?next=home",
+  ],
+  ["https://example.com/login", "https://example.com/login"],
+  ["http://127.0.0.1:8080/login", "http://127.0.0.1:8080/login"],
+])("accepts positional website %s as %s", async (url, expected) => {
+  const h = harness();
+  h.channel.finish({ status: "authenticated", save: { status: "not-saved" } });
+  expect(await runCli(["login", url, "--json"], h.deps)).toBe(0);
+  expect(h.client.login).toHaveBeenCalledWith(
+    expect.objectContaining({ url: expected }),
+  );
+});
+
+it.each([
+  "not a URL",
+  "javascript:alert(1)",
+  "http://example.com",
+  "https://user:private@example.com",
+])("reports invalid URL without attempting CDP: %s", async (url) => {
+  const h = harness();
+  expect(await runCli(["login", url, "--json"], h.deps)).toBe(1);
+  expect(h.client.login).not.toHaveBeenCalled();
+  expect(h.error()).toContain("Invalid website URL");
+  expect(h.error()).not.toContain("Could not connect");
+  expect(h.error()).not.toContain(url);
+  expect(h.output()).toBe("");
+});
+
 it("explains connection failures without polluting JSON output", async () => {
   const h = harness();
   h.deps.env = {};

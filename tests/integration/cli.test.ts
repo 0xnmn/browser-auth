@@ -37,7 +37,10 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
           choices: [
             {
               index: 0,
-              message: { role: "assistant", content: JSON.stringify(proposal) },
+              message: {
+                role: "assistant",
+                content: JSON.stringify({ proposal }),
+              },
               finish_reason: "stop",
             },
           ],
