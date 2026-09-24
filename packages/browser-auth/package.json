@@ -1,0 +1,44 @@
+{
+  "name": "@browser-auth/core",
+  "version": "0.1.0",
+  "description": "Human-supervised authentication for existing Chromium browsers",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.18.0 || >=24"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js"
+    },
+    "./tracing": {
+      "types": "./dist/tracing.d.ts",
+      "import": "./dist/tracing.js"
+    }
+  },
+  "bin": {
+    "browser-auth": "./dist/cli/main.js"
+  },
+  "scripts": {
+    "build": "tsdown"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.7.2",
+    "@opentelemetry/api": "^1.9.1",
+    "ai": "^7.0.112",
+    "playwright-core": "^1.63.0",
+    "zod": "^4.6.5"
+  },
+  "optionalDependencies": {
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/sdk-trace-base": "^2.8.0"
+  }
+}
