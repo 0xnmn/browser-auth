@@ -47,6 +47,7 @@ export interface ObservedElement {
   type: string;
   label: string;
   autocomplete: string;
+  expanded?: boolean;
 }
 
 export interface AuthObservation {

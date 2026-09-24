@@ -31,6 +31,81 @@ afterAll(async () => {
   await site?.close();
 });
 
+it.each([false, true])(
+  "discovers nested account menus before prompting (logout only: %s)",
+  async (logoutOnly) => {
+    const page = await shared.context.newPage();
+    await shared.context.addCookies([
+      { name: "account", value: "alice", url: site.url },
+    ]);
+    await page.goto(site.url);
+    await page.setContent(`<h1>Signed in as alice</h1>
+    <button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true'); document.querySelector('#menu').hidden=false">Profile</button>
+    <div id="menu" hidden><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true'); document.querySelector('#entries').hidden=false">More accounts</button>
+    <div id="entries" hidden><a role="menuitem" href="/logout">Sign out</a>${logoutOnly ? "" : '<a role="menuitem" href="/switch?to=bob">Work Bob</a><a role="menuitem" href="/add-account">Add account</a>'}</div></div>`);
+    let observations = 0;
+    let prompts = 0;
+    const run = await complete(
+      createAuth({
+        agent: {
+          async next(observation) {
+            observations++;
+            const menu = observation.elements.find(
+              (element) => element.expanded === false,
+            );
+            if (menu)
+              return {
+                kind: "session",
+                choices: [
+                  { elementId: menu.id, label: menu.label, kind: "accounts" },
+                ],
+              };
+            expect(
+              observation.elements.filter(
+                (element) => element.expanded === true,
+              ),
+            ).toHaveLength(2);
+            return {
+              kind: "session",
+              choices: observation.elements
+                .filter((element) => element.tag === "a")
+                .map((element) => ({
+                  elementId: element.id,
+                  label: element.label,
+                  kind:
+                    element.label === "Sign out"
+                      ? "logout"
+                      : element.label === "Work Bob"
+                        ? "switch"
+                        : "add",
+                })),
+            };
+          },
+        },
+      }).login(authTarget(shared, page)),
+      (interaction) => {
+        prompts++;
+        expect(observations).toBe(3);
+        expect(interaction.kind).toBe("session");
+        expect(interaction.choices.map((choice) => choice.kind)).toEqual(
+          logoutOnly
+            ? ["finish", "logout"]
+            : ["finish", "logout", "switch", "add"],
+        );
+        return defaultResponse(interaction);
+      },
+    );
+    expect(prompts).toBe(1);
+    expect(run.result).toEqual({ status: "already-signed-in" });
+    expect(
+      (await shared.context.cookies()).find(
+        (cookie) => cookie.name === "account",
+      )?.value,
+    ).toBe("alice");
+    expect(new URL(page.url()).pathname).toBe("/");
+  },
+);
+
 it.each(["navigation", "method-choice"] as const)(
   "automates navigation but preserves intentional choices: %s",
   async (mode) => {
@@ -135,7 +210,11 @@ it("uses one login flow for native session actions", async () => {
       const add = interaction.choices.find((choice) => choice.kind === "add");
       if (add) {
         expect(interaction.choices.map((choice) => choice.label)).toEqual(
-          expect.arrayContaining(["Sign out", "Switch account", "Add account"]),
+          expect.arrayContaining([
+            "Sign out",
+            "Work Bob",
+            "Add another account",
+          ]),
         );
       }
       return add
@@ -163,13 +242,10 @@ it("uses one login flow for native session actions", async () => {
   const switched = await complete(
     auth.login({ ...authTarget(shared, page) }),
     (interaction) => {
-      const accounts = interaction.choices.find(
-        (choice) => choice.kind === "accounts",
-      );
       const alice = interaction.choices.find(
         (choice) => choice.label === "Personal Alice",
       );
-      const choice = alice ?? accounts;
+      const choice = alice;
       return choice
         ? { kind: "choose", interactionId: interaction.id, choiceId: choice.id }
         : defaultResponse(interaction);
@@ -258,9 +334,11 @@ it("finishes an existing session without mutation or credential reads", async ()
         snapshot.interaction.choices.some((choice) => choice.kind === "finish"),
     ),
   ).toBe(true);
-  expect(await page.locator("body").innerText()).toContain(
-    "Signed in as alice",
-  );
+  expect(
+    (await context.cookies()).find((cookie) => cookie.name === "account")
+      ?.value,
+  ).toBe("alice");
+  expect(await page.locator("h1").innerText()).toBe("Choose account");
   expect(reads).toBe(0);
   expect(await originalList()).toEqual([]);
   await context.clearCookies();
@@ -299,13 +377,10 @@ it("selects a native existing account from the same flow", async () => {
   const run = await complete(
     auth.login({ ...authTarget(shared, page) }),
     (interaction) => {
-      const accounts = interaction.choices.find(
-        (choice) => choice.kind === "accounts",
-      );
       const bob = interaction.choices.find(
         (choice) => choice.label === "Work Bob",
       );
-      const choice = bob ?? accounts;
+      const choice = bob;
       return choice
         ? { kind: "choose", interactionId: interaction.id, choiceId: choice.id }
         : defaultResponse(interaction);
@@ -470,9 +545,9 @@ it.each(["completion", "credentials", "logout"])(
         },
       }).login(authTarget(shared, page)),
       (interaction) => {
-        const selected =
-          interaction.choices.find((choice) => choice.kind === "accounts") ??
-          interaction.choices.find((choice) => choice.kind === "logout");
+        const selected = interaction.choices.find(
+          (choice) => choice.kind === "logout",
+        );
         return selected
           ? {
               kind: "choose",

@@ -67,7 +67,9 @@ export class BrowserSurface {
         });
       texts.push(redactor.text(text).slice(0, 6000));
       const handles = await frame
-        .locator("input, button, a, [role=button], select")
+        .locator(
+          "input, button, a, [role=button], [role=menuitem], [role=option], [aria-expanded], select",
+        )
         .elementHandles();
       for (const element of handles) {
         if (
@@ -93,6 +95,7 @@ export class BrowserSurface {
                 : node.textContent) ||
               "",
             autocomplete: node.getAttribute("autocomplete") ?? "",
+            expanded: node.getAttribute("aria-expanded"),
           };
         });
         const id = randomUUID();
@@ -110,6 +113,9 @@ export class BrowserSurface {
           type: redactor.text(metadata.type).slice(0, 80),
           autocomplete: redactor.text(metadata.autocomplete).slice(0, 160),
           label: redactor.text(metadata.label).slice(0, 160),
+          ...(metadata.expanded === "true" || metadata.expanded === "false"
+            ? { expanded: metadata.expanded === "true" }
+            : {}),
         });
       }
     }

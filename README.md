@@ -85,7 +85,7 @@ const result = await flow.result;
 
 The `cdpUrl` and `yourUi` variables above belong to the host application. Replace `your-model-name` with a model supported by your provider. For external challenges, keep consuming updates while a prompt is open: it can expire or be replaced. Cancel/clear the old UI on replacement and never replay responses. The bundled CLI and React panel handle this lifecycle; `useAuthFlow` connects the panel to a host-supplied transport.
 
-Every call to `login` starts one flow. If the browser already has a signed-in session, the flow emits a `session` interaction whose choices are generated from observed native controls. The controller always appends a `finish` choice; other possible choice kinds are `logout`, `switch`, `add`, and `accounts`. `accounts` opens the site's native account menu so another observation can discover its entries—it does not imply that multiple accounts exist. Respond with the usual `{ kind: "choose", interactionId, choiceId }` to continue the same flow.
+Every call to `login` starts one flow. If the browser already has a signed-in session, the agent explores native account menus and nested lists internally before emitting a `session` interaction. Public choices represent authentication decisions only: `finish`, `logout`, `switch` to a specific account, and `add`. The controller always includes `finish`. Menu opening and expansion never require a response. Available actions depend on the website; discovery never selects an account or logs out as a fallback. Respond with the usual `{ kind: "choose", interactionId, choiceId }` to continue the same flow.
 
 ```ts
 const target = { cdpUrl, url: "https://service.example" };

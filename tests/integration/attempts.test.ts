@@ -42,7 +42,11 @@ async function startAttemptSite() {
 
     if (url.pathname === "/abort")
       html(
-        "<h1>Dashboard</h1><p>Signed in as alice</p><a href='/accounts'>Switch account</a><a href='/add-abort'>Add account</a>",
+        "<h1>Dashboard</h1><p>Signed in as alice</p><a href='/abort-accounts'>Switch account</a><a href='/add-abort'>Add account</a>",
+      );
+    else if (url.pathname === "/abort-accounts")
+      html(
+        "<h1>Choose account</h1><a href='/switch-b'>Work B</a><a href='/add-abort'>Add another account</a>",
       );
     else if (url.pathname === "/add-abort")
       html(

@@ -57,7 +57,7 @@ export type AuthInteraction =
       choices: Array<{
         id: string;
         label: string;
-        kind: "finish" | "logout" | "switch" | "add" | "accounts";
+        kind: "finish" | "logout" | "switch" | "add";
       }>;
     }
   | {

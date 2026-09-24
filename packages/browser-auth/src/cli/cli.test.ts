@@ -344,7 +344,7 @@ describe("runCli", () => {
         choices: [
           { id: "done", label: "Keep using this account", kind: "finish" },
           { id: "native-logout", label: "Sign out here", kind: "logout" },
-          { id: "account-menu", label: "Open profile menu", kind: "accounts" },
+          { id: "work-account", label: "Work account", kind: "switch" },
         ],
       },
     });
@@ -360,7 +360,7 @@ describe("runCli", () => {
       [
         { name: "Keep using this account", value: "done" },
         { name: "Sign out here", value: "native-logout" },
-        { name: "Open profile menu", value: "account-menu" },
+        { name: "Work account", value: "work-account" },
       ],
       expect.any(AbortSignal),
     );

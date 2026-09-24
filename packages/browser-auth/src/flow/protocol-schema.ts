@@ -65,7 +65,7 @@ export const interactionSchema = z.discriminatedUnion("kind", [
           .object({
             id: z.string(),
             label: z.string(),
-            kind: z.enum(["finish", "logout", "switch", "add", "accounts"]),
+            kind: z.enum(["finish", "logout", "switch", "add"]),
           })
           .strict(),
       ),

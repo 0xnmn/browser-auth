@@ -151,6 +151,19 @@ export async function runFlow(
           );
         for (const choice of proposal.choices)
           await surface.validate(choice.elementId, signal);
+        const menu = proposal.choices.find(
+          (choice) => choice.kind === "accounts",
+        );
+        if (menu) {
+          operation = "choose-account";
+          phase = "browser_action";
+          await surface.click(menu.elementId, signal);
+          history.push(
+            `Inspected account controls: ${redactor.text(menu.label)}. Discover the revealed actions before asking the user; do not toggle an already expanded menu.`,
+          );
+          await delay(150, undefined, { signal });
+          continue;
+        }
         const answer = await flow.ask(
           {
             kind: "session",
@@ -160,11 +173,17 @@ export async function runFlow(
                 label: "Keep this session and finish",
                 kind: "finish",
               },
-              ...proposal.choices.map((choice) => ({
-                id: choice.elementId,
-                label: redactor.text(choice.label),
-                kind: choice.kind,
-              })),
+              ...proposal.choices.flatMap((choice) =>
+                choice.kind === "accounts"
+                  ? []
+                  : [
+                      {
+                        id: choice.elementId,
+                        label: redactor.text(choice.label),
+                        kind: choice.kind,
+                      },
+                    ],
+              ),
             ],
           },
           signal,

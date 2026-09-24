@@ -45,6 +45,15 @@ export class FixtureAgent implements AuthAgent {
         };
       if (!text.includes("Add another account")) {
         const nativeControl = byLabel("Switch account");
+        if (!nativeControl && text.includes("Dashboard")) {
+          const logout = byLabel("Sign out");
+          return {
+            kind: "session",
+            choices: logout
+              ? [{ elementId: logout.id, label: logout.label, kind: "logout" }]
+              : [],
+          };
+        }
         return nativeControl
           ? { kind: "click", elementId: nativeControl.id }
           : { kind: "done", outcome: "unsupported" };
