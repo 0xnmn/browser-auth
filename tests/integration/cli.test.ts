@@ -18,6 +18,7 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
   const site = await startAuthSite();
   const shared = await launchSharedBrowser();
   const agent = new FixtureAgent();
+  let transientFailures = 0;
   const model = createServer(async (request, response) => {
     try {
       let body = "";
@@ -31,6 +32,22 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
           ? content
           : content.find((part: { type: string }) => part.type === "text").text,
       );
+      if (
+        !transientFailures &&
+        observation.history?.some((entry: string) =>
+          entry.startsWith("Field receipt:"),
+        )
+      ) {
+        transientFailures++;
+        response
+          .writeHead(503, { "content-type": "application/json" })
+          .end(
+            JSON.stringify({
+              error: { message: "Synthetic transient failure" },
+            }),
+          );
+        return;
+      }
       const proposal = await agent.next(observation);
       const { kind, ...args } = proposal;
       response.setHeader("content-type", "application/json");
@@ -125,6 +142,12 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
         );
     }
     expect(await exited, JSON.stringify(snapshots.at(-1))).toBe(0);
+    expect(transientFailures).toBe(1);
+    expect(snapshots).toContainEqual({
+      status: "running",
+      message:
+        "Model temporarily unavailable; retrying without repeating browser actions",
+    });
     // The compatible provider warns that strict structured output is unavailable.
     expect(errors).not.toContain("browser-auth could not");
     expect(errors).not.toContain(fixturePassword);

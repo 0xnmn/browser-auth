@@ -29,7 +29,8 @@
 - The AI SDK call uses `toolChoice: "required"` and accepts exactly one tool call.
 - The selected tool name and input are reconstructed and validated against the union.
 - Invalid names, inputs, missing output, and multiple calls become safe model failures.
-- AI SDK telemetry is disabled and automatic model retries are disabled.
+- AI SDK telemetry and adapter retries are disabled. The controller reobserves and retries only transient model connection/server failures, at most twice consecutively; it never replays a browser action.
+- Unknown element references receive a corrective observation before any effect; three consecutive invalid-reference proposals fail explicitly.
 - The model cannot request arbitrary JavaScript evaluation.
 - No proposal tool exposes cookies, web storage, request headers, or network interception.
 - No proposal argument carries a password, code, or other private field value.
@@ -69,6 +70,7 @@
 - Those references point to captured element handles retained by the controller.
 - Playwright AI refs and model-authored selectors are not used.
 - Private input descendants and values are omitted from tree text.
+- Editable field metadata includes only a `filled` presence flag, never a value or length, so continuation does not require exposing credentials.
 - Text, labels, types, and autocomplete metadata pass through known-value redaction.
 - Before writes, the controller checks captured identity, connectivity, origin, and freshness.
 - Session decisions additionally validate the observed documents and visible text.
@@ -103,7 +105,7 @@
 10. Fill captured controls privately and submit only the associated native form/control.
 11. For meaningful choices, publish generic choices and await a single-use response.
 12. Revalidate the page and captured element before dispatching the chosen native action.
-13. For external work, publish a polling interaction while the human uses the browser.
+13. For external work, publish a polling interaction while the human uses the browser. Unchanged external screens without choices are polled without model calls or model-step consumption; the overall timeout still applies.
 14. Accept completion only from fresh visible evidence matching the requested operation.
 15. Handle save consent and storage independently from website authentication success.
 16. Disconnect only connections created by the SDK; never close borrowed browser objects.

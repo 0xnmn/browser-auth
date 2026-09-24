@@ -595,7 +595,7 @@ it.each(["completion", "credentials", "logout"])(
       next === "completion"
         ? { status: "unknown" }
         : next === "credentials"
-          ? { status: "failed", error: { code: "stale_page" } }
+          ? { status: "failed", error: { code: "invalid_element_reference" } }
           : { status: "signed-out" },
     );
     expect(reads).toBe(0);

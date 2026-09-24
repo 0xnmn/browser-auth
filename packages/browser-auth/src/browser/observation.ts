@@ -11,6 +11,8 @@ export interface BrowserObservedElement {
   type: string;
   label: string;
   autocomplete: string;
+  /** Presence only, never the value or its length. */
+  filled?: boolean;
   expanded?: boolean;
   options?: Array<{
     index: number;
@@ -230,6 +232,23 @@ export class BrowserSurface {
                 : textReader.read(node)) ||
               "",
             autocomplete: node.getAttribute("autocomplete") ?? "",
+            filled:
+              (element instanceof HTMLInputElement &&
+                [
+                  "text",
+                  "email",
+                  "password",
+                  "tel",
+                  "search",
+                  "url",
+                  "number",
+                ].includes(element.type)) ||
+              element instanceof HTMLTextAreaElement
+                ? (element as HTMLInputElement | HTMLTextAreaElement).value
+                    .length > 0
+                : node.isContentEditable
+                  ? (node.textContent ?? "").length > 0
+                  : undefined,
             expanded: node.getAttribute("aria-expanded"),
             options:
               element instanceof HTMLSelectElement
@@ -250,6 +269,7 @@ export class BrowserSurface {
           type: redactor.text(raw.type).slice(0, 80),
           autocomplete: redactor.text(raw.autocomplete).slice(0, 160),
           label: redactor.text(raw.label).slice(0, 160),
+          ...(raw.filled === undefined ? {} : { filled: raw.filled }),
           ...(raw.expanded === "true" || raw.expanded === "false"
             ? { expanded: raw.expanded === "true" }
             : {}),

@@ -343,7 +343,9 @@ it.each([
   [429, "model_rate_limited"],
   [400, "model_request_rejected"],
   [422, "model_request_rejected"],
-  [500, "model_request_failed"],
+  [500, "model_unavailable"],
+  [503, "model_unavailable"],
+  [undefined, "model_connection_failed"],
 ] as const)(
   "maps HTTP %s to safe error %s without retaining raw data",
   async (statusCode, code) => {
@@ -353,7 +355,7 @@ it.each([
           message: "private-error",
           url: "https://private.endpoint",
           requestBodyValues: { secret: "private-value" },
-          statusCode,
+          ...(statusCode === undefined ? {} : { statusCode }),
           responseBody: "private-body",
         });
       },

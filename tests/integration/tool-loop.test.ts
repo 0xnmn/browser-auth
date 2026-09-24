@@ -24,6 +24,42 @@ afterEach(async () => {
   await site.close();
 });
 
+it("refreshes a stale control before dispatch without replaying a click", async () => {
+  const page = await shared.context.newPage();
+  await page.goto(site.url);
+  await page.setContent(
+    '<button onclick="document.body.dataset.clicks=String(Number(document.body.dataset.clicks||0)+1)">Continue</button>',
+  );
+  let turns = 0;
+  const run = await complete(
+    createAuthWithAgent({
+      agent: {
+        async next(observation) {
+          const turn = turns++;
+          if (turn === 0) {
+            await page
+              .locator("button")
+              .evaluate((node) => node.replaceWith(node.cloneNode(true)));
+          } else if (turn === 1) {
+            expect(
+              await page.locator("body").getAttribute("data-clicks"),
+            ).toBeNull();
+          } else {
+            return { kind: "done", outcome: "unsupported" };
+          }
+          return { kind: "click", elementId: observation.elements[0]!.id };
+        },
+      },
+    }).login(authTarget(shared, page)),
+  );
+  expect(turns).toBe(3);
+  expect(await page.locator("body").getAttribute("data-clicks")).toBe("1");
+  expect(run.result).toMatchObject({
+    status: "failed",
+    error: { code: "unsupported" },
+  });
+});
+
 it("does not claim account change when final control validation prevents the click", async () => {
   const page = await shared.context.newPage();
   await page.goto(site.url);
@@ -314,3 +350,219 @@ it("allows discovery with a previously valid long saved-account label", async ()
   expect(offered).toBe(true);
   expect(run.result.status).toBe("authenticated");
 });
+
+it("exposes only filled state and retries reasoning without repeating credential entry", async () => {
+  const page = await shared.context.newPage();
+  await page.goto(site.url);
+  await page.setContent(
+    `<label>Email<input type=email oninput="document.body.dataset.fills=String(Number(document.body.dataset.fills||0)+1)"></label><button type=button onclick="document.querySelector('label').remove(); this.remove(); document.body.append('Signed in')">Next</button>`,
+  );
+  let calls = 0;
+  let prompts = 0;
+  const run = await complete(
+    createAuthWithAgent({
+      agent: {
+        async next(observation) {
+          calls++;
+          expect(JSON.stringify(observation)).not.toContain(
+            "private-person@example.test",
+          );
+          if (calls === 1) {
+            const field = observation.elements.find(
+              (element) => element.tag === "input",
+            )!;
+            expect(field.filled).toBe(false);
+            return {
+              kind: "ask_user",
+              message: "Email",
+              fields: [
+                {
+                  elementId: field.id,
+                  key: "email",
+                  label: "Email",
+                  type: "email",
+                  rejected: false,
+                },
+              ],
+              choices: [],
+              external: false,
+              submitElementId: null,
+            };
+          }
+          if (calls === 2)
+            throw new AuthFailure(
+              "model_unavailable",
+              "Temporary provider failure",
+            );
+          if (calls === 3) {
+            expect(
+              observation.elements.find((element) => element.tag === "input")
+                ?.filled,
+            ).toBe(true);
+            expect(observation.history).toContain(
+              "Field receipt: email (email)",
+            );
+            return {
+              kind: "click",
+              elementId: observation.elements.find(
+                (element) => element.tag === "button",
+              )!.id,
+            };
+          }
+          return { kind: "done", outcome: "authenticated" };
+        },
+      },
+    }).login({ ...authTarget(shared, page), save: "never" }),
+    (interaction) => {
+      if (interaction.fields.length) {
+        prompts++;
+        return {
+          kind: "submit",
+          interactionId: interaction.id,
+          values: {
+            [interaction.fields[0]!.id]: "private-person@example.test",
+          },
+        };
+      }
+      return defaultResponse(interaction);
+    },
+  );
+  expect(run.result.status).toBe("authenticated");
+  expect(calls).toBe(4);
+  expect(prompts).toBe(1);
+  expect(await page.locator("body").getAttribute("data-fills")).toBe("1");
+});
+
+it("polls unchanged external challenges without spending model steps", async () => {
+  const page = await shared.context.newPage();
+  await page.goto(site.url);
+  await page.setContent("<h1>Approve on your device</h1>");
+  let calls = 0;
+  let waits = 0;
+  const run = await complete(
+    createAuthWithAgent({
+      limits: { maxSteps: 2 },
+      agent: {
+        async next(observation) {
+          if (++calls === 1)
+            return {
+              kind: "ask_user",
+              message: "Approve on your device",
+              fields: [],
+              choices: [],
+              external: true,
+              submitElementId: null,
+            };
+          expect(observation.text).toContain("Signed in");
+          return { kind: "done", outcome: "authenticated" };
+        },
+      },
+    }).login({ ...authTarget(shared, page), save: "never" }),
+    async (interaction) => {
+      expect(interaction.pollAfterMs).toBe(1500);
+      expect(calls).toBe(1);
+      if (++waits === 3) await page.setContent("<h1>Signed in</h1>");
+      return null;
+    },
+  );
+  expect(run.result.status).toBe("authenticated");
+  expect(calls).toBe(2);
+  expect(waits).toBe(3);
+});
+
+it("corrects invented references before any action or user prompt", async () => {
+  const page = await shared.context.newPage();
+  await page.goto(site.url);
+  await page.setContent(
+    "<button onclick=\"document.body.dataset.clicked='yes'\">Continue</button>",
+  );
+  let calls = 0;
+  const run = await complete(
+    createAuthWithAgent({
+      agent: {
+        async next(observation) {
+          if (++calls === 1) return { kind: "click", elementId: "invented" };
+          if (calls === 2) {
+            expect(observation.context).toContain("No action was performed");
+            expect(
+              await page.locator("body").getAttribute("data-clicked"),
+            ).toBeNull();
+            return { kind: "click", elementId: observation.elements[0]!.id };
+          }
+          return { kind: "done", outcome: "unsupported" };
+        },
+      },
+    }).login(authTarget(shared, page)),
+  );
+  expect(calls).toBe(3);
+  expect(await page.locator("body").getAttribute("data-clicked")).toBe("yes");
+  expect(run.snapshots.some((snapshot) => snapshot.status === "waiting")).toBe(
+    false,
+  );
+});
+
+it.each(["model_unavailable", "invalid_element_reference"])(
+  "bounds recovery for %s",
+  async (code) => {
+    const page = await shared.context.newPage();
+    await page.goto(site.url);
+    let calls = 0;
+    const run = await complete(
+      createAuthWithAgent({
+        agent: {
+          async next() {
+            calls++;
+            if (code === "model_unavailable")
+              throw new AuthFailure(code, "Temporary provider failure");
+            return { kind: "click", elementId: "invented" };
+          },
+        },
+      }).login(authTarget(shared, page)),
+    );
+    expect(calls).toBe(3);
+    expect(run.result).toMatchObject({ status: "failed", error: { code } });
+  },
+);
+
+it.each([false, true])(
+  "enforces model-step limits with tracing %s",
+  async (traced) => {
+    const page = await shared.context.newPage();
+    await page.goto(site.url);
+    let calls = 0;
+    const steps: number[] = [];
+    const run = await complete(
+      createAuthWithAgent({
+        limits: { maxSteps: 2 },
+        ...(traced
+          ? {
+              tracer: {
+                startFlow() {
+                  return {
+                    step(index: number) {
+                      steps.push(index);
+                    },
+                    action() {},
+                    end() {},
+                  };
+                },
+              },
+            }
+          : {}),
+        agent: {
+          async next() {
+            return ++calls <= 2
+              ? { kind: "observe" }
+              : { kind: "done", outcome: "rejected" };
+          },
+        },
+      }).login(authTarget(shared, page)),
+    );
+    expect(calls).toBe(2);
+    expect(steps).toEqual(traced ? [0, 1] : []);
+    expect(run.result).toEqual({
+      status: "unknown",
+      message: "The authentication step limit was reached",
+    });
+  },
+);

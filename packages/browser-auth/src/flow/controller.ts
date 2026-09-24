@@ -52,9 +52,13 @@ export async function runFlow(
   let browserSession: BrowserSession | undefined;
   let currentPage = undefined as BrowserSurface["page"] | undefined;
   let contextResult: string | undefined;
+  let externalWait: { fingerprint: string; message: string } | undefined;
+  let modelFailures = 0;
+  let invalidReferences = 0;
   let result: AuthResult;
   let phase = "browser_connect";
   let writeAttempted = false;
+  let actionWriteAttempted = false;
   let authProgress = false;
   let accountAction: "switch" | "add" | undefined;
   let afterBack = false;
@@ -80,14 +84,13 @@ export async function runFlow(
       );
     let accounts = newAttempt();
 
-    for (let step = 0; step < (options.limits?.maxSteps ?? 30); step++) {
+    for (let step = 0; step < (options.limits?.maxSteps ?? 30);) {
       signal.throwIfAborted();
       if (browserSession.nativeDialogSeen)
         throw new AuthFailure(
           "native_dialog_unsupported",
           "Native browser dialogs are not supported",
         );
-      span?.step(step);
       const page = browserSession.current();
       if (!surface || currentPage !== page) {
         await surface?.clear();
@@ -99,6 +102,7 @@ export async function runFlow(
               "Native browser dialogs are not supported",
             );
           writeAttempted = true;
+          actionWriteAttempted = true;
         });
       }
       flow.publish({
@@ -111,23 +115,63 @@ export async function runFlow(
         page !== connection.page
           ? await abortable(openerSurface.observe(redactor), signal)
           : undefined;
-      phase = "agent";
-      const proposed = await abortable(
-        agent.next(
-          {
-            ...observation,
-            operation,
-            history,
-            ...(opener
-              ? { opener: { origin: opener.origin, text: opener.text } }
-              : {}),
-            ...(contextResult ? { context: contextResult } : {}),
-            availableCredentialKeys: accounts.keys(),
-          },
-          { signal },
+      const fingerprint = JSON.stringify({
+        origin: observation.origin,
+        text: observation.text,
+        elements: observation.elements.map(
+          ({ id: _id, ...element }) => element,
         ),
-        signal,
-      );
+        opener: opener && { origin: opener.origin, text: opener.text },
+      });
+      if (externalWait?.fingerprint === fingerprint) {
+        await flow.ask(
+          { message: externalWait.message, fields: [], choices: [] },
+          signal,
+          1500,
+        );
+        continue;
+      }
+      externalWait = undefined;
+      span?.step(step);
+      step++;
+      phase = "agent";
+      let proposed: AuthProposal;
+      try {
+        proposed = await abortable(
+          agent.next(
+            {
+              ...observation,
+              operation,
+              history,
+              ...(opener
+                ? { opener: { origin: opener.origin, text: opener.text } }
+                : {}),
+              ...(contextResult ? { context: contextResult } : {}),
+              availableCredentialKeys: accounts.keys(),
+            },
+            { signal },
+          ),
+          signal,
+        );
+        modelFailures = 0;
+      } catch (error) {
+        if (
+          error instanceof AuthFailure &&
+          ["model_unavailable", "model_connection_failed"].includes(
+            error.code,
+          ) &&
+          ++modelFailures <= 2
+        ) {
+          flow.publish({
+            status: "running",
+            message:
+              "Model temporarily unavailable; retrying without repeating browser actions",
+          });
+          await delay(modelFailures * 1000, undefined, { signal });
+          continue;
+        }
+        throw error;
+      }
       const parsed = proposalSchema.safeParse(proposed);
       if (!parsed.success)
         throw new AuthFailure(
@@ -136,6 +180,34 @@ export async function runFlow(
         );
       const proposal = parsed.data as AuthProposal;
       contextResult = undefined;
+      const references =
+        proposal.kind === "ask_user"
+          ? [
+              ...proposal.fields.map((field) => field.elementId),
+              ...proposal.choices
+                .filter((choice) => choice.intent !== "finish")
+                .map((choice) => choice.elementId),
+              ...(proposal.submitElementId ? [proposal.submitElementId] : []),
+            ]
+          : proposal.kind === "drag"
+            ? [proposal.sourceElementId, proposal.targetElementId]
+            : "elementId" in proposal && proposal.elementId
+              ? [proposal.elementId]
+              : [];
+      const observedIds = new Set(
+        observation.elements.map((element) => element.id),
+      );
+      if (references.some((id) => !observedIds.has(id))) {
+        if (++invalidReferences >= 3)
+          throw new AuthFailure(
+            "invalid_element_reference",
+            "The model repeatedly requested controls absent from the current observation",
+          );
+        contextResult =
+          "No action was performed: a proposed element reference was not in the observation. Copy exact current elements[].id values; do not invent identifiers.";
+        continue;
+      }
+      invalidReferences = 0;
       span?.action(proposal.kind);
       signal.throwIfAborted();
       if (browserSession.nativeDialogSeen)
@@ -371,6 +443,11 @@ export async function runFlow(
           );
           signal.throwIfAborted();
           if (proposal.external && operation === "login") authProgress = true;
+          if (proposal.external && !proposal.choices.length && answer === null)
+            externalWait = {
+              fingerprint,
+              message: redactor.text(proposal.message),
+            };
           if (answer?.kind === "choose") {
             const choice = proposal.choices.find(
               (entry) => entry.elementId === answer.choiceId,
@@ -421,7 +498,23 @@ export async function runFlow(
       if (browserActions.has(proposal.kind as BrowserAction["kind"])) {
         phase = "browser_action";
         const action = proposal as BrowserAction;
-        const executed = await surface.execute(action, signal);
+        actionWriteAttempted = false;
+        const executed = await surface
+          .execute(action, signal)
+          .catch((error: unknown) => {
+            if (
+              error instanceof AuthFailure &&
+              error.code === "stale_page" &&
+              !actionWriteAttempted
+            )
+              return null;
+            throw error;
+          });
+        if (!executed) {
+          contextResult =
+            "The page changed before dispatch. No browser write was attempted; inspect the fresh observation and choose the next action.";
+          continue;
+        }
         if (action.kind === "click" && afterBack && accountAction === "add")
           afterBack = false;
         if (executed.kind === "inspection")
