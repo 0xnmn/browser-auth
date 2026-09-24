@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { interactionSchema, responseSchema } from "../protocol.js";
+import { parseInteraction, parseResponse } from "../protocol.js";
 import type {
   AuthFlow,
   AuthInteraction,
@@ -84,7 +84,7 @@ export class FlowChannel implements AuthFlow {
     signal.throwIfAborted();
     if (this.snapshot.status === "done") throw new Error("flow_completed");
     if (this.pending) throw new Error("An interaction is already pending");
-    const interaction = interactionSchema.parse({ ...input, id: randomUUID() });
+    const interaction = parseInteraction({ ...input, id: randomUUID() });
     return new Promise((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
@@ -109,9 +109,7 @@ export class FlowChannel implements AuthFlow {
   }
 
   async respond(input: AuthResponse): Promise<void> {
-    const parsed = responseSchema.safeParse(input);
-    if (!parsed.success) throw new Error("invalid_response");
-    const response = parsed.data;
+    const response = parseResponse(input);
     const pending = this.pending;
     if (!pending || pending.interaction.id !== response.interactionId)
       throw new Error("stale_interaction");

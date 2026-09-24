@@ -8,16 +8,11 @@ export type {
   SavedLoginSummary,
   StoreQuery,
 } from "./credentials/store.js";
-export type {
-  AuthAgent,
-  AuthObservation,
-  AuthProposal,
-  ObservedElement,
-} from "./agent/proposals.js";
-export { proposalSchema } from "./agent/proposals.js";
+export type { AuthTracer, AuthTrace, OtlpOptions } from "./tracing.js";
 export type {
   AuthOptions,
   AuthTarget,
+  ModelConfig,
   LoginOptions,
   LogoutOptions,
   SwitchOptions,

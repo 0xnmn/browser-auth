@@ -1,3 +1,4 @@
+import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { AuthFlow, AuthSnapshot } from "../protocol.js";
 import type { AuthClient } from "../auth.js";
@@ -63,19 +64,21 @@ function harness(authFlow: AuthFlow) {
   const login = vi.fn(() => authFlow);
   const deps: Partial<CliDependencies> = {
     env: { BROWSER_AUTH_CDP_URL: "ws://secret-endpoint" },
-    stdout: {
-      write: (value) => {
+    stdout: new Writable({
+      write: (value, _encoding, callback) => {
         out += String(value);
-        return true;
+        callback();
       },
-    },
+    }),
     stderr: {
       write: (value) => {
         err += String(value);
         return true;
       },
     },
-    loadConfig: vi.fn(async () => ({ agent: { next: vi.fn() } }) as never),
+    loadConfig: vi.fn(async () => ({
+      model: { provider: "openai" as const, model: "fixture" },
+    })),
     createClient: vi.fn(
       () =>
         ({

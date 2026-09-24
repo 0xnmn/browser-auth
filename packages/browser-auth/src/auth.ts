@@ -10,14 +10,25 @@ import type {
   SwitchOptions,
 } from "./types.js";
 import type { StoreQuery } from "./credentials/store.js";
+import { validateOperationOptions } from "./options.js";
+import type { AuthAgent } from "./agent/proposals.js";
 
 export function createAuth(options: AuthOptions) {
-  if ((!options.model && !options.agent) || (options.model && options.agent))
-    throw new Error("Provide exactly one model or agent");
+  if ("agent" in options) throw new Error("Custom agents are not supported");
+  return createAuthWithAgent({
+    ...options,
+    agent: createModelAgent(options.model),
+  });
+}
+
+/** Internal injection point for deterministic controller tests; not a package export. */
+export function createAuthWithAgent(
+  options: Omit<AuthOptions, "model"> & { agent: AuthAgent },
+) {
   for (const value of Object.values(options.limits ?? {}))
     if (!Number.isInteger(value) || value <= 0)
       throw new Error("Limits must be positive integers");
-  const agent = options.agent ?? createModelAgent(options.model!);
+  const agent = options.agent;
   const store = options.store ?? new InMemoryStore();
   let busy = false;
 
@@ -26,20 +37,7 @@ export function createAuth(options: AuthOptions) {
     input: LoginOptions | LogoutOptions | SwitchOptions,
   ): AuthFlow {
     if (busy) throw new Error("This auth client already has an active flow");
-    if (!!input.page === !!input.cdpUrl || (!input.page && !input.url))
-      throw new Error("Provide page or cdpUrl with url");
-    if (
-      "forgetCredentials" in input &&
-      input.forgetCredentials &&
-      !input.accountId
-    )
-      throw new Error("Forgetting credentials requires accountId");
-    if (
-      "save" in input &&
-      input.save &&
-      !["yes", "ask", "never"].includes(input.save)
-    )
-      throw new Error("Invalid save policy");
+    validateOperationOptions(operation, input);
     const flow = new FlowChannel();
     busy = true;
     void flow.result.then(() => {

@@ -1,26 +1,51 @@
-import type { LanguageModel } from "ai";
-import type { Page } from "playwright-core";
-import type { Tracer } from "@opentelemetry/api";
-import type { AuthAgent } from "./agent/proposals.js";
 import type { Credentials, CredentialStore } from "./credentials/store.js";
+import type { AuthTracer } from "./tracing.js";
 
-export type AuthTarget =
-  | { page: Page; cdpUrl?: never; cdpHeaders?: never; url?: never }
+export interface AuthTarget {
+  cdpUrl: string;
+  cdpHeaders?: Record<string, string>;
+  url: string;
+  /** Optional standard CDP TargetID for precise existing-tab selection. */
+  targetId?: string;
+}
+
+export type ModelConfig = {
+  model: string;
+  apiKey?: string;
+  baseURL?: string;
+  headers?: Record<string, string>;
+} & (
+  | { provider: "openai"; api?: "responses" | "chat" }
+  | { provider: "anthropic" }
   | {
-      cdpUrl: string;
-      cdpHeaders?: Record<string, string>;
-      url: string;
-      page?: never;
-    };
+      provider: "openai-compatible";
+      baseURL: string;
+      name?: string;
+      queryParams?: Record<string, string>;
+      supportsStructuredOutputs?: boolean;
+    }
+  | {
+      provider: "gateway";
+      providerOptions?: {
+        gateway: {
+          /** Preferred upstream provider order. */
+          order?: string[];
+          /** Restrict routing to these providers. */
+          only?: string[];
+          /** Fallback model IDs, tried after the primary model. */
+          models?: string[];
+        };
+      };
+    }
+);
 
-export type AuthOptions = (
-  { model: LanguageModel; agent?: never } | { agent: AuthAgent; model?: never }
-) & {
+export interface AuthOptions {
+  model: ModelConfig;
   store?: CredentialStore;
   limits?: { maxSteps?: number; timeoutMs?: number; actionTimeoutMs?: number };
   /** Opt-in only. Spans contain fixed operation names and counters, never payloads. */
-  tracer?: Tracer;
-};
+  tracer?: AuthTracer;
+}
 
 export type LoginOptions = AuthTarget & {
   credentials?: Credentials;

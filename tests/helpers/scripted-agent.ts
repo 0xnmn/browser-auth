@@ -2,7 +2,7 @@ import type {
   AuthAgent,
   AuthObservation,
   AuthProposal,
-} from "../../packages/browser-auth/src/index.js";
+} from "../../packages/browser-auth/src/agent/proposals.js";
 
 /** Deterministic fixture interpreter, not a substitute for real-model evaluations. */
 export class FixtureAgent implements AuthAgent {

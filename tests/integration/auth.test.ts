@@ -1,38 +1,38 @@
-import { afterAll, beforeAll, expect, it } from "vitest";
-import { chromium } from "playwright-core";
-import type { Browser } from "playwright-core";
-import {
-  createAuth,
-  InMemoryStore,
-} from "../../packages/browser-auth/src/index.js";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
+import { InMemoryStore } from "../../packages/browser-auth/src/index.js";
+import { createAuthWithAgent as createAuth } from "../../packages/browser-auth/src/auth.js";
 import { BrowserSurface } from "../../packages/browser-auth/src/browser/observation.js";
 import { Redactor } from "../../packages/browser-auth/src/security/redaction.js";
-import {
-  BasicTracerProvider,
-  InMemorySpanExporter,
-  SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
 import {
   startAuthSite,
   fixturePassword,
   fixtureCode,
 } from "../fixtures/auth-site.js";
 import { FixtureAgent } from "../helpers/scripted-agent.js";
+import {
+  authTarget,
+  launchSharedBrowser,
+  type SharedBrowser,
+} from "../helpers/browser.js";
 import { complete, defaultResponse } from "../helpers/respond.js";
 
-let browser: Browser;
+let shared: SharedBrowser;
 let site: Awaited<ReturnType<typeof startAuthSite>>;
 beforeAll(async () => {
   site = await startAuthSite();
-  browser = await chromium.launch({ headless: true });
+});
+beforeEach(async () => {
+  shared = await launchSharedBrowser();
+});
+afterEach(async () => {
+  await shared?.close();
 });
 afterAll(async () => {
-  await browser?.close();
   await site?.close();
 });
 
 it("logs in with partial inputs, saves, offers stored accounts, switches and logs out with forgetting", async () => {
-  const context = await browser.newContext();
+  const context = shared.context;
   const page = await context.newPage();
   await page.goto(site.url);
   const store = new InMemoryStore();
@@ -40,7 +40,7 @@ it("logs in with partial inputs, saves, offers stored accounts, switches and log
   const auth = createAuth({ agent, store });
   const first = await complete(
     auth.login({
-      page,
+      ...authTarget(shared, page),
       credentials: { username: "alice" },
       save: "yes",
       label: "Personal",
@@ -58,14 +58,14 @@ it("logs in with partial inputs, saves, offers stored accounts, switches and log
   expect(JSON.stringify(agent.observations)).not.toContain(fixturePassword);
   expect(JSON.stringify(first.snapshots)).not.toContain(fixturePassword);
 
-  expect((await complete(auth.logout({ page }))).result.status).toBe(
-    "signed-out",
-  );
+  expect(
+    (await complete(auth.logout(authTarget(shared, page)))).result.status,
+  ).toBe("signed-out");
   expect(await store.list()).toHaveLength(1);
   await page.goto(site.url);
   const second = await complete(
     auth.login({
-      page,
+      ...authTarget(shared, page),
       credentials: { username: "bob", password: fixturePassword },
       label: "Work",
       save: "yes",
@@ -87,14 +87,18 @@ it("logs in with partial inputs, saves, offers stored accounts, switches and log
   expect(await store.list()).toHaveLength(2);
 
   const switched = await complete(
-    auth.switchAccount({ page, accountId: alice.id }),
+    auth.switchAccount({ ...authTarget(shared, page), accountId: alice.id }),
   );
   expect(switched.result.status).toBe("authenticated");
   expect(await page.locator("body").innerText()).toContain(
     "Signed in as alice",
   );
   const logout = await complete(
-    auth.logout({ page, accountId: alice.id, forgetCredentials: true }),
+    auth.logout({
+      ...authTarget(shared, page),
+      accountId: alice.id,
+      forgetCredentials: true,
+    }),
   );
   expect(logout.result).toMatchObject({
     status: "signed-out",
@@ -104,7 +108,9 @@ it("logs in with partial inputs, saves, offers stored accounts, switches and log
   expect(await store.list()).toHaveLength(1);
 
   await page.goto(site.url);
-  const reuse = await complete(auth.login({ page, save: "never" }));
+  const reuse = await complete(
+    auth.login({ ...authTarget(shared, page), save: "never" }),
+  );
   expect(reuse.result.status).toBe("authenticated");
   expect(
     reuse.snapshots.some(
@@ -119,7 +125,7 @@ it("logs in with partial inputs, saves, offers stored accounts, switches and log
 });
 
 it("does not save supplied credentials when already signed in or when rejected", async () => {
-  const context = await browser.newContext();
+  const context = shared.context;
   await context.addCookies([
     { name: "account", value: "alice", url: site.url },
   ]);
@@ -129,7 +135,7 @@ it("does not save supplied credentials when already signed in or when rejected",
   const auth = createAuth({ agent: new FixtureAgent(), store });
   const already = await complete(
     auth.login({
-      page,
+      ...authTarget(shared, page),
       credentials: { password: "unused-secret" },
       save: "yes",
     }),
@@ -143,7 +149,7 @@ it("does not save supplied credentials when already signed in or when rejected",
   await page.goto(site.url);
   const rejected = await complete(
     auth.login({
-      page,
+      ...authTarget(shared, page),
       credentials: { username: "alice", password: "wrong-fixture-value" },
       save: "yes",
     }),
@@ -157,7 +163,7 @@ it("does not save supplied credentials when already signed in or when rejected",
 });
 
 it("does not claim the requested account when a different native account is selected", async () => {
-  const context = await browser.newContext();
+  const context = shared.context;
   const page = await context.newPage();
   await context.addCookies([
     { name: "account", value: "alice", url: site.url },
@@ -174,7 +180,7 @@ it("does not claim the requested account when a different native account is sele
   const auth = createAuth({ agent: new FixtureAgent(), store });
   let checkedIdentity = false;
   const run = await complete(
-    auth.switchAccount({ page, accountId: "alice" }),
+    auth.switchAccount({ ...authTarget(shared, page), accountId: "alice" }),
     (interaction) => {
       if (
         interaction.kind === "confirm" &&
@@ -204,14 +210,18 @@ it("does not claim the requested account when a different native account is sele
 });
 
 it("supports multi-step input, website Back and manual OTP without storing the code", async () => {
-  const context = await browser.newContext();
+  const context = shared.context;
   const page = await context.newPage();
   await page.goto(`${site.url}/multi`);
   const store = new InMemoryStore();
   const auth = createAuth({ agent: new FixtureAgent(), store });
   let wentBack = false;
   const run = await complete(
-    auth.login({ page, credentials: { phone: "+15551112222" }, save: "yes" }),
+    auth.login({
+      ...authTarget(shared, page),
+      credentials: { phone: "+15551112222" },
+      save: "yes",
+    }),
     (interaction) => {
       const back = interaction.choices.find((choice) => choice.kind === "back");
       if (back && !wentBack) {
@@ -232,7 +242,7 @@ it("supports multi-step input, website Back and manual OTP without storing the c
   const codeStore = new InMemoryStore();
   const otp = await complete(
     createAuth({ agent: new FixtureAgent(), store: codeStore }).login({
-      page,
+      ...authTarget(shared, page),
       save: "yes",
     }),
   );
@@ -244,7 +254,7 @@ it("supports multi-step input, website Back and manual OTP without storing the c
 
 it("binds cross-origin iframe credentials to the actual identity origin", async () => {
   const identity = await startAuthSite();
-  const context = await browser.newContext();
+  const context = shared.context;
   const page = await context.newPage();
   await page.goto(
     `${site.url}/frame?origin=${encodeURIComponent(identity.url)}`,
@@ -252,7 +262,7 @@ it("binds cross-origin iframe credentials to the actual identity origin", async 
   const store = new InMemoryStore();
   const run = await complete(
     createAuth({ agent: new FixtureAgent(), store }).login({
-      page,
+      ...authTarget(shared, page),
       save: "yes",
     }),
   );
@@ -274,7 +284,7 @@ it("binds cross-origin iframe credentials to the actual identity origin", async 
 });
 
 it("rejects stale element handles and empty-form submit bypasses", async () => {
-  const context = await browser.newContext();
+  const context = shared.context;
   const page = await context.newPage();
   await page.goto(site.url);
   const surface = new BrowserSurface(page, 1000);
@@ -309,7 +319,7 @@ it("rejects stale element handles and empty-form submit bypasses", async () => {
       },
     },
   });
-  const run = await complete(auth.login({ page }));
+  const run = await complete(auth.login(authTarget(shared, page)));
   expect(run.result).toMatchObject({
     status: "failed",
     error: { code: "invalid_submit" },
@@ -320,13 +330,15 @@ it("rejects stale element handles and empty-form submit bypasses", async () => {
 });
 
 it("keeps successful login separate from storage failures and records only safe trace attributes", async () => {
-  const context = await browser.newContext();
+  const context = shared.context;
   const page = await context.newPage();
   await page.goto(site.url);
-  const exporter = new InMemorySpanExporter();
-  const provider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(exporter)],
-  });
+  const traces: Array<{
+    operation: string;
+    steps: number[];
+    actions: string[];
+    status?: string;
+  }> = [];
   const store = new InMemoryStore();
   store.save = async () => {
     throw new Error(`private error ${fixturePassword}`);
@@ -334,11 +346,27 @@ it("keeps successful login separate from storage failures and records only safe 
   const auth = createAuth({
     agent: new FixtureAgent(),
     store,
-    tracer: provider.getTracer("test"),
+    tracer: {
+      startFlow(operation) {
+        const trace = {
+          operation,
+          steps: [],
+          actions: [],
+        } as (typeof traces)[number];
+        traces.push(trace);
+        return {
+          step: (index) => trace.steps.push(index),
+          action: (kind) => trace.actions.push(kind),
+          end: (status) => {
+            trace.status = status;
+          },
+        };
+      },
+    },
   });
   const run = await complete(
     auth.login({
-      page,
+      ...authTarget(shared, page),
       credentials: { username: "alice", password: fixturePassword },
       save: "yes",
     }),
@@ -347,21 +375,20 @@ it("keeps successful login separate from storage failures and records only safe 
     status: "authenticated",
     save: { status: "failed", error: { code: "store_save_failed" } },
   });
-  await provider.forceFlush();
-  const spans = exporter.getFinishedSpans();
-  expect(spans).toHaveLength(1);
-  const serialized = JSON.stringify(
-    spans.map(({ attributes, events }) => ({ attributes, events })),
-  );
+  expect(traces).toHaveLength(1);
+  expect(traces[0]).toMatchObject({
+    operation: "login",
+    status: "authenticated",
+  });
+  const serialized = JSON.stringify(traces);
   expect(serialized).not.toContain(fixturePassword);
   expect(serialized).not.toContain(site.url);
   expect(JSON.stringify(run)).not.toContain(fixturePassword);
-  await provider.shutdown();
   await context.close();
 });
 
 it("redacts known credentials reflected in element metadata as well as page text", async () => {
-  const context = await browser.newContext();
+  const context = shared.context;
   const page = await context.newPage();
   await page.goto(site.url);
   const surface = new BrowserSurface(page, 1000);
@@ -381,13 +408,13 @@ it("redacts known credentials reflected in element metadata as well as page text
 });
 
 it("cancels before input without writes and keeps known authentication if save consent is cancelled", async () => {
-  const context = await browser.newContext();
+  const context = shared.context;
   const page = await context.newPage();
   await page.goto(site.url);
   const auth = createAuth({ agent: new FixtureAgent() });
   const controller = new AbortController();
   const run = await complete(
-    auth.login({ page, signal: controller.signal }),
+    auth.login({ ...authTarget(shared, page), signal: controller.signal }),
     () => {
       controller.abort();
       return null;
@@ -398,7 +425,7 @@ it("cancels before input without writes and keeps known authentication if save c
   const saving = new AbortController();
   const loggedIn = await complete(
     auth.login({
-      page,
+      ...authTarget(shared, page),
       credentials: { username: "alice", password: fixturePassword },
       signal: saving.signal,
       save: "ask",

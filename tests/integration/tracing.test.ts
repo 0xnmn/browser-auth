@@ -34,20 +34,24 @@ it("exports spans to the configured OTLP endpoint without installing a global pr
       url: `http://127.0.0.1:${port}/v1/traces`,
       headers: { "x-fixture-collector": "local" },
     });
-    const span = tracing.tracer.startSpan("integration.fixed-span", {
-      attributes: { "test.kind": "otlp", "test.fixed": 42 },
-    });
-    span.end();
+    const flow = tracing.tracer.startFlow("login");
+    flow.step(2);
+    flow.action("form");
+    flow.end("authenticated");
     await tracing.shutdown();
 
     expect(requests).toHaveLength(1);
     expect(requests[0]!.headers["x-fixture-collector"]).toBe("local");
     // The protobuf wire body retains UTF-8 field names and string values verbatim.
     const payload = requests[0]!.body.toString("utf8");
-    expect(payload).toContain("integration.fixed-span");
-    expect(payload).toContain("test.kind");
-    expect(payload).toContain("otlp");
-    expect(payload).toContain("test.fixed");
+    expect(payload).toContain("browser_auth.flow");
+    expect(payload).toContain("auth.operation");
+    expect(payload).toContain("login");
+    expect(payload).toContain("auth.step");
+    expect(payload).toContain("auth.action");
+    expect(payload).toContain("form");
+    expect(payload).toContain("auth.result");
+    expect(payload).toContain("authenticated");
 
     const globalAfter = trace
       .getTracer("global-after")

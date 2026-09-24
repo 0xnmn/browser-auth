@@ -1,6 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { Page } from "playwright-core";
-import { SpanStatusCode } from "@opentelemetry/api";
 import { AccountSession, confirm } from "../credentials/accounts.js";
 import type { CredentialStore } from "../credentials/store.js";
 import { BrowserSurface } from "../browser/observation.js";
@@ -8,7 +7,7 @@ import { connectTarget } from "../browser/connection.js";
 import type { BrowserConnection } from "../browser/connection.js";
 import { AuthFailure, abortable } from "../errors.js";
 import { Redactor } from "../security/redaction.js";
-import { proposalSchema } from "../agent/proposals.js";
+import { proposalSchema } from "../agent/proposal-schema.js";
 import type { AuthAgent } from "../agent/proposals.js";
 import type {
   AuthOptions,
@@ -22,7 +21,7 @@ import { FlowChannel } from "./interaction.js";
 export async function runFlow(
   operation: "login" | "logout" | "switch",
   input: LoginOptions | LogoutOptions | SwitchOptions,
-  options: AuthOptions,
+  options: Omit<AuthOptions, "model">,
   agent: AuthAgent,
   store: CredentialStore,
   flow: FlowChannel,
@@ -32,9 +31,7 @@ export async function runFlow(
     ? AbortSignal.any([input.signal, deadline])
     : deadline;
   const timeout = options.limits?.actionTimeoutMs ?? 10_000;
-  const span = options.tracer?.startSpan("browser_auth.flow", {
-    attributes: { "auth.operation": operation },
-  });
+  const span = options.tracer?.startFlow(operation);
   const redactor = new Redactor();
   let connection: BrowserConnection | undefined;
   let surface: BrowserSurface | undefined;
@@ -73,7 +70,7 @@ export async function runFlow(
     if (operation !== "logout") await accounts.initialize(input.accountId);
     for (let step = 0; step < (options.limits?.maxSteps ?? 30); step++) {
       signal.throwIfAborted();
-      span?.addEvent("step", { "auth.step": step });
+      span?.step(step);
       const popup = [...popups].reverse().find((page) => !page.isClosed());
       const page = popup ?? connection.page;
       if (!surface || currentPage !== page) {
@@ -108,7 +105,7 @@ export async function runFlow(
           "The agent returned an invalid action",
         );
       const proposal = parsed.data;
-      span?.addEvent("proposal", { "auth.action": proposal.kind });
+      span?.action(proposal.kind);
       signal.throwIfAborted();
       if (proposal.kind === "done") {
         if (
@@ -253,7 +250,6 @@ export async function runFlow(
               },
       };
     }
-    span?.setStatus({ code: SpanStatusCode.ERROR });
   }
   if (
     operation === "logout" &&
@@ -273,7 +269,6 @@ export async function runFlow(
   await surface?.clear().catch(() => {});
   await connection?.disconnect().catch(() => {});
   redactor.clear();
-  span?.setAttribute("auth.result", result.status);
-  span?.end();
+  span?.end(result.status);
   flow.finish(result);
 }

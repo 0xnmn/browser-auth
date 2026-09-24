@@ -1,10 +1,22 @@
-import type { Tracer } from "@opentelemetry/api";
+import type { AuthResult } from "./protocol.js";
 
-/** Explicitly creates a private provider; never installs a global tracer. */
-export async function createOtlpTracing(options: {
+export interface AuthTrace {
+  step(index: number): void;
+  action(kind: "click" | "form" | "external" | "done" | "wait"): void;
+  end(result: AuthResult["status"]): void;
+}
+export interface AuthTracer {
+  startFlow(operation: "login" | "logout" | "switch"): AuthTrace;
+}
+export interface OtlpOptions {
   url: string;
   headers?: Record<string, string>;
-}): Promise<{ tracer: Tracer; shutdown(): Promise<void> }> {
+}
+
+/** Explicitly creates a private provider; never installs a global tracer. */
+export async function createOtlpTracing(
+  options: OtlpOptions,
+): Promise<{ tracer: AuthTracer; shutdown(): Promise<void> }> {
   const [{ BasicTracerProvider, BatchSpanProcessor }, { OTLPTraceExporter }] =
     await Promise.all([
       import("@opentelemetry/sdk-trace-base"),
@@ -20,8 +32,29 @@ export async function createOtlpTracing(options: {
       ),
     ],
   });
+  const tracer = provider.getTracer("browser-auth", "0.1.0");
   return {
-    tracer: provider.getTracer("browser-auth", "0.1.0"),
+    tracer: {
+      startFlow(operation) {
+        const span = tracer.startSpan("browser_auth.flow", {
+          attributes: { "auth.operation": operation },
+        });
+        return {
+          step: (index) => {
+            span.addEvent("step", { "auth.step": index });
+          },
+          action: (kind) => {
+            span.addEvent("proposal", { "auth.action": kind });
+          },
+          end: (result) => {
+            span.setAttribute("auth.result", result);
+            if (result === "failed" || result === "unknown")
+              span.setStatus({ code: 2 });
+            span.end();
+          },
+        };
+      },
+    },
     shutdown: () => provider.shutdown(),
   };
 }

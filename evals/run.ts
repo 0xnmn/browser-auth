@@ -1,17 +1,18 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { chromium } from "playwright-core";
 import {
   createAuth,
   InMemoryStore,
 } from "../packages/browser-auth/src/index.js";
 import type { AuthOptions } from "../packages/browser-auth/src/index.js";
+import { createAuthWithAgent } from "../packages/browser-auth/src/auth.js";
 import {
   startAuthSite,
   fixturePassword,
   fixtureCode,
 } from "../tests/fixtures/auth-site.js";
 import { FixtureAgent } from "../tests/helpers/scripted-agent.js";
+import { authTarget, launchSharedBrowser } from "../tests/helpers/browser.js";
 import { complete, defaultResponse } from "../tests/helpers/respond.js";
 
 async function run() {
@@ -21,12 +22,11 @@ async function run() {
     !(args.length === 2 && args[0] === "--config")
   )
     throw new Error("usage");
-  const options: AuthOptions =
+  const options: AuthOptions | undefined =
     args[0] === "--scripted"
-      ? { agent: new FixtureAgent() }
+      ? undefined
       : (await import(pathToFileURL(resolve(args[1]!)).href)).default;
   const site = await startAuthSite();
-  const browser = await chromium.launch();
   const results = [];
   try {
     for (const [name, path] of [
@@ -34,19 +34,22 @@ async function run() {
       ["multi-step", "/multi"],
       ["manual-code", "/otp"],
     ] as const) {
-      const context = await browser.newContext();
+      const browser = await launchSharedBrowser();
+      const context = browser.context;
       const started = performance.now();
       try {
         const page = await context.newPage();
         await page.goto(`${site.url}${path}`);
         const store = new InMemoryStore();
-        const auth = createAuth({
-          ...options,
+        const common = {
           store,
           limits: { maxSteps: 15, timeoutMs: 60_000 },
-        });
+        };
+        const auth = options
+          ? createAuth({ ...options, ...common })
+          : createAuthWithAgent({ agent: new FixtureAgent(), ...common });
         const run = await complete(
-          auth.login({ page, save: "yes" }),
+          auth.login({ ...authTarget(browser, page), save: "yes" }),
           async (interaction) => {
             if (
               interaction.kind === "confirm" &&
@@ -79,11 +82,10 @@ async function run() {
           durationMs: Math.round(performance.now() - started),
         });
       } finally {
-        await context.close();
+        await browser.close();
       }
     }
   } finally {
-    await browser.close();
     await site.close();
   }
   process.stdout.write(

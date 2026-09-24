@@ -19,14 +19,6 @@ export async function connectTarget(
   timeout: number,
 ): Promise<BrowserConnection> {
   signal.throwIfAborted();
-  if (target.page) {
-    return {
-      page: target.page,
-      context: target.page.context(),
-      serviceOrigin: originOf(target.page.url()),
-      disconnect: async () => {},
-    };
-  }
   const serviceOrigin = originOf(target.url);
   const browser = await chromium.connectOverCDP(target.cdpUrl, {
     headers: target.cdpHeaders ?? {},
@@ -42,8 +34,29 @@ export async function connectTarget(
         "The browser has no shared default context",
       );
     const pages = context.pages();
-    let matches = pages.filter((page) => page.url() === target.url);
-    if (!matches.length)
+    let matches: Page[] = [];
+    if (target.targetId) {
+      for (const page of pages) {
+        const session = await context.newCDPSession(page);
+        try {
+          const { targetInfo } = await session.send("Target.getTargetInfo");
+          if (targetInfo.targetId === target.targetId) matches.push(page);
+        } finally {
+          await session.detach();
+        }
+      }
+      if (!matches.length)
+        throw new AuthFailure(
+          "target_not_found",
+          "The selected CDP tab no longer exists",
+        );
+      if (originOf(matches[0]!.url()) !== serviceOrigin)
+        throw new AuthFailure(
+          "target_origin_mismatch",
+          "The selected tab does not match the requested website origin",
+        );
+    } else matches = pages.filter((page) => page.url() === target.url);
+    if (!target.targetId && !matches.length)
       matches = pages.filter((page) => {
         try {
           return originOf(page.url()) === serviceOrigin;

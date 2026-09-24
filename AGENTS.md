@@ -3,7 +3,8 @@
 ## Scope and architecture
 
 - TypeScript, strict mode, ESM, Node 22.18+ or 24+. The SDK is the implementation; the CLI and React package are renderers/adapters.
-- Keep public exports explicit. Use Zod schemas for agent proposals and interactive protocol data; derive their TypeScript types.
+- Keep public exports explicit and dependency-neutral. Public contracts use package-owned types, plain configuration, and parser functions. Playwright, AI SDK, OpenTelemetry, and Zod stay internal; never export their objects or inferred types.
+- Every SDK operation and option must be available through the CLI, including machine-readable updates/responses and cancellation. Test the parity and the built declarations.
 - The controller owns consent, credential access, lifecycle, and completion. Agents receive observations and propose actions, never secrets or browser handles.
 - Use the caller's shared browser context. Never close a borrowed page, context, or browser. Disconnect only connections we create.
 - Prefer small direct functions over registries, abstract base classes, and speculative adapters.
