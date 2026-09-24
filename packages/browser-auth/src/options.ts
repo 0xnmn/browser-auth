@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { originOf } from "./security/origins.js";
+import type { LoginOptions } from "./types.js";
 
 const headers = z.record(z.string(), z.string());
 const target = {
@@ -36,7 +37,7 @@ const schema = z
   .refine((value) => !value.forgetCredentials || Boolean(value.accountId));
 
 /** Validate public operation input without exposing the runtime schemas. */
-export function validateOperationOptions(value: unknown): void {
+export function validateOperationOptions(value: unknown): LoginOptions {
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new Error("invalid_login_options");
   try {
@@ -44,4 +45,43 @@ export function validateOperationOptions(value: unknown): void {
   } catch {
     throw new Error("invalid_auth_url");
   }
+  const data = parsed.data;
+  const credentials = data.credentials
+    ? {
+        ...(data.credentials.username !== undefined
+          ? { username: data.credentials.username }
+          : {}),
+        ...(data.credentials.email !== undefined
+          ? { email: data.credentials.email }
+          : {}),
+        ...(data.credentials.phone !== undefined
+          ? { phone: data.credentials.phone }
+          : {}),
+        ...(data.credentials.password !== undefined
+          ? { password: data.credentials.password }
+          : {}),
+        ...(data.credentials.fields !== undefined
+          ? { fields: data.credentials.fields }
+          : {}),
+      }
+    : undefined;
+  const common = {
+    cdpUrl: data.cdpUrl,
+    url: data.url,
+    ...(data.cdpHeaders !== undefined ? { cdpHeaders: data.cdpHeaders } : {}),
+    ...(data.targetId !== undefined ? { targetId: data.targetId } : {}),
+    ...(data.signal !== undefined ? { signal: data.signal } : {}),
+    ...(credentials !== undefined ? { credentials } : {}),
+    ...(data.label !== undefined ? { label: data.label } : {}),
+    ...(data.save !== undefined ? { save: data.save } : {}),
+  };
+  return data.forgetCredentials
+    ? { ...common, forgetCredentials: true, accountId: data.accountId! }
+    : {
+        ...common,
+        ...(data.accountId !== undefined ? { accountId: data.accountId } : {}),
+        ...(data.forgetCredentials !== undefined
+          ? { forgetCredentials: false as const }
+          : {}),
+      };
 }

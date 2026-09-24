@@ -7,6 +7,7 @@ import type { AuthOptions, LoginOptions } from "./types.js";
 import type { StoreQuery } from "./credentials/store.js";
 import { validateOperationOptions } from "./options.js";
 import type { AuthAgent } from "./agent/proposals.js";
+import { AuthFailure } from "./errors.js";
 
 export function createAuth(options: AuthOptions) {
   if ("agent" in options) throw new Error("Custom agents are not supported");
@@ -29,13 +30,13 @@ export function createAuthWithAgent(
 
   function start(input: LoginOptions): AuthFlow {
     if (busy) throw new Error("This auth client already has an active flow");
-    validateOperationOptions(input);
+    const validated = validateOperationOptions(input);
     const flow = new FlowChannel();
     busy = true;
     void flow.result.then(() => {
       busy = false;
     });
-    void runFlow(input, options, agent, store, flow).catch(() => {
+    void runFlow(validated, options, agent, store, flow).catch(() => {
       flow.finish({
         status: "failed",
         error: {
@@ -50,8 +51,26 @@ export function createAuthWithAgent(
   return {
     login: start,
     accounts: {
-      list: (query?: StoreQuery) => store.list(query),
-      remove: (id: string) => store.delete(id),
+      list: async (query?: StoreQuery) => {
+        try {
+          return await store.list(query);
+        } catch {
+          throw new AuthFailure(
+            "account_list_failed",
+            "Saved accounts could not be listed",
+          );
+        }
+      },
+      remove: async (id: string) => {
+        try {
+          await store.delete(id);
+        } catch {
+          throw new AuthFailure(
+            "account_remove_failed",
+            "The saved account could not be removed",
+          );
+        }
+      },
     },
   };
 }

@@ -264,7 +264,13 @@ it.each([
   expect(h.error()).toContain("Invalid website URL");
   expect(h.error()).not.toContain("Could not connect");
   expect(h.error()).not.toContain(url);
-  expect(h.output()).toBe("");
+  expect(JSON.parse(h.output())).toEqual({
+    status: "done",
+    result: {
+      status: "failed",
+      error: { code: "invalid_auth_url", message: "Invalid website URL" },
+    },
+  });
 });
 
 it("explains connection failures without polluting JSON output", async () => {
@@ -351,6 +357,77 @@ const jsonArgs = [
   "config.mjs",
   "--json",
 ];
+
+it.each(["config", "input", "account", "syntax"])(
+  "emits safe JSON for %s failures",
+  async (stage) => {
+    const h = harness();
+    const privateError = () => {
+      throw new Error("private-backend-token");
+    };
+    if (stage === "config") h.deps.loadConfig = privateError;
+    if (stage === "input") h.deps.loadInput = privateError;
+    if (stage === "account") h.config.store.list = privateError;
+    const args =
+      stage === "account"
+        ? ["accounts", "list", "--config", "config.mjs", "--json"]
+        : stage === "syntax"
+          ? ["login", "--json"]
+          : [...jsonArgs, "--input", "private.json"];
+    expect(await runCli(args, h.deps)).toBe(stage === "syntax" ? 2 : 1);
+    expect(JSON.parse(h.output())).toMatchObject({
+      status: "done",
+      result: {
+        status: "failed",
+        error: {
+          code:
+            stage === "config"
+              ? "config_load_failed"
+              : stage === "input"
+                ? "input_load_failed"
+                : stage === "account"
+                  ? "account_list_failed"
+                  : "invalid_command",
+        },
+      },
+    });
+    expect(h.output() + h.error()).not.toContain("private-backend-token");
+    expect(h.client.login).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["interactive", "accounts", "waiting"])(
+  "handles delayed stdout failure in %s",
+  async (mode) => {
+    const h = harness();
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        setImmediate(() => callback(new Error("private-pipe-error")));
+      },
+      destroy(error, callback) {
+        setImmediate(() => callback(error));
+      },
+    });
+    h.deps.stdout = stdout;
+    const args =
+      mode === "accounts"
+        ? ["accounts", "list", "--config", "config.mjs"]
+        : jsonArgs.filter((arg) => arg !== "--json");
+    let pending: Promise<unknown> | undefined;
+    if (mode === "waiting") {
+      pending = h.channel.ask(
+        { kind: "external", message: "Waiting", choices: [] },
+        new AbortController().signal,
+      );
+    }
+    expect(await runCli(args, h.deps)).toBe(1);
+    if (mode !== "accounts")
+      expect(h.client.login.mock.calls[0]![0].signal!.aborted).toBe(true);
+    if (pending) expect(await pending).toBeNull();
+    expect(stdout.listenerCount("error")).toBe(0);
+    expect(h.error()).not.toContain("private-pipe-error");
+  },
+);
 it.each(["--work", "--help", ""])(
   "removes an exact account ID %j using --id",
   async (id) => {

@@ -3,7 +3,8 @@ import type { AuthResult } from "./protocol.js";
 export interface AuthTrace {
   step(index: number): void;
   action(
-    kind: "click" | "form" | "external" | "done" | "wait" | "session",
+    kind:
+      "click" | "form" | "external" | "done" | "wait" | "session" | "opener",
   ): void;
   end(result: AuthResult["status"]): void;
 }

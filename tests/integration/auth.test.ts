@@ -278,8 +278,8 @@ it("does not invent missing website session capabilities", async () => {
   await context.close();
 });
 
-it.each(["logout", "finish", "reload", "replace"])(
-  "rejects stale session choice %s",
+it.each(["logout", "finish", "reload", "replace", "clone"])(
+  "refreshes stale session choice %s without replaying it",
   async (change) => {
     const context = shared.context;
     await context.addCookies([
@@ -289,7 +289,7 @@ it.each(["logout", "finish", "reload", "replace"])(
     await page.goto(site.url);
     const flow = createAuth({
       agent:
-        change === "logout"
+        change === "logout" || change === "clone"
           ? new FixtureAgent()
           : { next: async () => ({ kind: "session", choices: [] }) },
     }).login(authTarget(shared, page));
@@ -302,20 +302,43 @@ it.each(["logout", "finish", "reload", "replace"])(
       throw new Error("missing interaction");
     const interaction = snapshot.value.interaction;
     const selected = interaction.choices.find(
-      (choice) => choice.kind === (change === "logout" ? "logout" : "finish"),
+      (choice) =>
+        choice.kind ===
+        (change === "logout" || change === "clone" ? "logout" : "finish"),
     )!;
     if (change === "reload") await page.reload();
     else if (change === "replace") await page.setContent("<h1>Signed out</h1>");
+    else if (change === "clone")
+      await page
+        .getByText("Sign out", { exact: true })
+        .evaluate((element) => element.replaceWith(element.cloneNode(true)));
     else await page.goto(`${site.url}/unsupported`);
     await flow.respond({
       kind: "choose",
       interactionId: interaction.id,
       choiceId: selected.id,
     });
-    expect(await flow.result).toMatchObject({
-      status: "failed",
-      error: { code: "stale_page" },
+    snapshot = await iterator.next();
+    while (!snapshot.done && snapshot.value.status !== "waiting")
+      snapshot = await iterator.next();
+    if (snapshot.done || snapshot.value.status !== "waiting")
+      throw new Error("missing refreshed interaction");
+    const refreshed = snapshot.value.interaction;
+    expect(refreshed.id).not.toBe(interaction.id);
+    await expect(
+      flow.respond({
+        kind: "choose",
+        interactionId: interaction.id,
+        choiceId: selected.id,
+      }),
+    ).rejects.toThrow("stale_interaction");
+    await flow.respond({
+      kind: "choose",
+      interactionId: refreshed.id,
+      choiceId: refreshed.choices.find((choice) => choice.kind === "finish")!
+        .id,
     });
+    expect(await flow.result).toEqual({ status: "already-signed-in" });
     expect(
       (await context.cookies()).find((cookie) => cookie.name === "account")
         ?.value,

@@ -4,7 +4,7 @@ This is experimental human-supervised browser automation, not a hardened secret 
 
 ## Trusted components
 
-The Node process, caller, credential store, AI SDK provider implementation, configured agent, UI host, and CDP browser are trusted. A custom agent or CLI configuration is executable code with the host's privileges. A CDP endpoint grants broad browser control; keep it private and authenticated. Use explicit tenant-scoped stores and flows. Origin consent is not a substitute for authorization between users of your application.
+The Node process, caller, credential store, AI SDK provider implementation, UI host, and CDP browser are trusted. CLI configuration modules are executable code with the host's privileges; custom agents are not a public extension point. A CDP endpoint grants broad browser control; keep it private and authenticated. Use explicit tenant-scoped stores and flows. Origin consent is not a substitute for authorization between users of your application.
 
 ## Implemented controls
 
@@ -15,6 +15,7 @@ The Node process, caller, credential store, AI SDK provider implementation, conf
 - Responses bind to a single-use interaction ID. Old responses are rejected. The only confirmations are controller-authored credential-use destination consent and credential-save consent. Page-provided text is still untrusted and can be socially misleading.
 - No raw exception serialization in flow output. Opt-in traces use fixed names and metadata. Model-adapter telemetry is disabled. UI responses, store calls, CDP endpoints, and page content must never be logged by the host.
 - Storage errors remain separate from website outcomes. Uncertain/cancelled writes are not automatically retried.
+- Credential save candidates belong to one attempt. Returning to a native session chooser discards abandoned candidates; Back within the credential sequence preserves them. Native account selection may request reauthentication but does not authorize a logout fallback.
 
 ## Not protected
 

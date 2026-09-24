@@ -21,28 +21,40 @@ export function useAuthFlow(transport: AuthTransport): UseAuthFlowResult {
 
   useEffect(() => {
     let active = true;
-    const iterator = transport.updates()[Symbol.asyncIterator]();
+    let iterator: AsyncIterator<AuthSnapshot> | undefined;
+    let receivedTerminalResult = false;
+
+    const interrupt = () => {
+      if (!active || receivedTerminalResult) return;
+      setState({
+        transport,
+        snapshot: {
+          status: "done",
+          result: {
+            status: "unknown",
+            message:
+              "The authentication connection was interrupted. Check the browser before retrying.",
+          },
+        },
+      });
+    };
 
     void (async () => {
       try {
+        iterator = transport.updates()[Symbol.asyncIterator]();
         while (active) {
           const next = await iterator.next();
-          if (!active || next.done) break;
+          if (!active) return;
+          if (next.done) {
+            interrupt();
+            return;
+          }
+          if (receivedTerminalResult) continue;
+          receivedTerminalResult = next.value.status === "done";
           setState({ transport, snapshot: next.value });
         }
       } catch {
-        if (active)
-          setState({
-            transport,
-            snapshot: {
-              status: "done",
-              result: {
-                status: "unknown",
-                message:
-                  "The authentication connection was interrupted. Check the browser before retrying.",
-              },
-            },
-          });
+        interrupt();
       }
     })();
 
@@ -50,7 +62,7 @@ export function useAuthFlow(transport: AuthTransport): UseAuthFlowResult {
       active = false;
       void (async () => {
         try {
-          await iterator.return?.();
+          await iterator?.return?.();
         } catch {
           // Teardown is best-effort and must not surface transport details.
         }

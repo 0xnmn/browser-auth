@@ -114,6 +114,10 @@ Records distinguish `serviceOrigins` (where the account is useful) from credenti
 
 Supplied fields override stored values for the current attempt. Choose “Use another account” to save a new record instead of updating the selected one. First version persistence is conservative: only `username`, `email`, `phone`, and `password` are saved. Fields classified as `code` and arbitrary custom fields are not saved. This relies on correct agent field classification; it is not a universal detector of one-time secrets.
 
+Website Back preserves a multi-step credential attempt. Returning to a native session chooser abandons its credential-save candidates, so a later native switch cannot save earlier inputs. Selecting an existing browser account can continue through password/OTP reauthentication without logging out as a fallback. `accountId` is returned when a saved record actually supplied a filled value in the completed attempt, even with `save: "never"` or declined saving; merely selecting a record does not attach its ID.
+
+`accounts.list()` and `accounts.remove()` reject with fixed `Error` messages and a `code` property (`account_list_failed` / `account_remove_failed`); raw store errors and their causes are not exposed.
+
 ## Models and limits
 
 ```ts
@@ -181,14 +185,16 @@ All operation options are accepted through `--input /private/options.json`: `cdp
 
 **Automation:** `browser-auth login --config ./auth.config.mjs --input /private/options.json --json` emits one `AuthSnapshot` JSON object per stdout line, including the final `done` result. Write one plain `AuthResponse` per stdin line, or `{"kind":"cancel"}`. Keep stdin open while the flow runs; EOF cancels it. Stale responses are rejected with a fixed stderr message; malformed/oversized input cancels rather than replaying a browser write. Input files and response lines are limited to 256 KiB, with individual response values limited to 8,192 characters. `--input -` is deliberately rejected: stdin is reserved for flow responses. Responses contain secrets—never capture stdin in logs. Stdout carries snapshots, not credentials or echoed responses, and stderr carries safe diagnostics.
 
-| SDK capability                       | CLI equivalent                                             |
-| ------------------------------------ | ---------------------------------------------------------- |
-| `login(options)`                     | `login`                                                    |
-| All target and operation options     | `--input` plus explicit flags                              |
-| `accounts.list`, `accounts.remove`   | `accounts list`, `accounts remove`                         |
-| `updates()`, `respond()`, `result`   | `--json` stdout snapshots / stdin responses / final `done` |
-| `AbortSignal`                        | Ctrl+C, JSON cancel, or stdin EOF                          |
-| Agent, model, store, limits, tracing | Shared `--config` module                                   |
+| SDK capability                     | CLI equivalent                                             |
+| ---------------------------------- | ---------------------------------------------------------- |
+| `login(options)`                   | `login`                                                    |
+| All target and operation options   | `--input` plus explicit flags                              |
+| `accounts.list`, `accounts.remove` | `accounts list`, `accounts remove`                         |
+| `updates()`, `respond()`, `result` | `--json` stdout snapshots / stdin responses / final `done` |
+| `AbortSignal`                      | Ctrl+C, JSON cancel, or stdin EOF                          |
+| Model, store, limits, tracing      | Shared `--config` module                                   |
+
+In `--json` mode, command-syntax, configuration, input, and account-operation errors also emit a `done` / `failed` snapshot with a stable code. Invalid syntax exits 2; runtime/startup failures exit 1. A broken stdout cancels an active flow and exits 1 without retrying the browser action or promising a deliverable JSON result. Interactive mode prints the explanation for `unknown`, not just its status.
 
 ## Optional React and tracing
 
@@ -205,6 +211,8 @@ await tracing.shutdown();
 Tracing is off by default. The helper creates a private provider and does not register a global tracer. It exports operation/result, step counts, and action kinds—not page text, URLs, headers, credentials, or raw exceptions. Its returned tracer implements the package-owned `AuthTracer.startFlow(operation)` contract, producing an `AuthTrace` with `step(index)`, `action(kind)`, and `end(resultStatus)`. Custom recorders implement these small interfaces, not OpenTelemetry types. In CLI config, register `tracing.shutdown()` with a `beforeExit` handler to flush before the process exits. Do not add host instrumentation that records prompt or credential payloads.
 
 ## Boundaries and current limitations
+
+Stale session choices are consumed and refreshed within the same flow, never replayed. Session freshness is a conservative document/text check, not server-side verification. SSO popups can return observation to the service page even if they remain open; no popup is closed by the SDK. Outcomes still depend on model interpretation, including whether Back stays inside a credential attempt or returns to session selection.
 
 See [SECURITY.md](SECURITY.md). There is no guarantee of support for every website. SPA controls not associated with an actual HTML form need a fill-only proposal followed by an explicit user-confirmed click; the default agent can still misclassify them. Native switching/adding never falls back to logout. Popup and iframe handling is bounded and best-effort. External challenges require access to the original browser; there is no remote-desktop stream. Recovery/enrollment, automatic TOTP, credential imports, password managers, encrypted file stores, and session revocation across devices are outside v1.
 

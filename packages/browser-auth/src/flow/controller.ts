@@ -30,6 +30,8 @@ export async function runFlow(
   const redactor = new Redactor();
   let connection: BrowserConnection | undefined;
   let surface: BrowserSurface | undefined;
+  let openerSurface: BrowserSurface | undefined;
+  const completedPopups = new Set<Page>();
   let currentPage: Page | undefined;
   const watched = new Set<Page>();
   const popups: Page[] = [];
@@ -47,6 +49,7 @@ export async function runFlow(
   let phase = "browser_connect";
   let writeAttempted = false;
   let accountAction: "switch" | "add" | undefined;
+  let afterBack = false;
   const history: string[] = [];
   let accountsInitialized = false;
   let completedLogin:
@@ -55,18 +58,24 @@ export async function runFlow(
     connection = await connectTarget(input, flow, signal, timeout);
     currentPage = connection.page;
     watch(currentPage);
-    const accounts = new AccountSession(
-      store,
-      flow,
-      redactor,
-      signal,
-      connection.serviceOrigin,
-      "credentials" in input ? input.credentials : undefined,
-    );
+    const serviceOrigin = connection.serviceOrigin;
+    openerSurface = new BrowserSurface(connection.page, timeout);
+    const newAttempt = () =>
+      new AccountSession(
+        store,
+        flow,
+        redactor,
+        signal,
+        serviceOrigin,
+        input.credentials,
+      );
+    let accounts = newAttempt();
     for (let step = 0; step < (options.limits?.maxSteps ?? 30); step++) {
       signal.throwIfAborted();
       span?.step(step);
-      const popup = [...popups].reverse().find((page) => !page.isClosed());
+      const popup = [...popups]
+        .reverse()
+        .find((page) => !page.isClosed() && !completedPopups.has(page));
       const page = popup ?? connection.page;
       if (!surface || currentPage !== page) {
         await surface?.clear();
@@ -81,6 +90,9 @@ export async function runFlow(
       });
       phase = "browser_observe";
       const observation = await abortable(surface.observe(redactor), signal);
+      const opener = popup
+        ? await abortable(openerSurface.observe(redactor), signal)
+        : undefined;
       phase = "agent";
       const proposed = await abortable(
         agent.next(
@@ -88,6 +100,9 @@ export async function runFlow(
             ...observation,
             operation,
             history,
+            ...(opener
+              ? { opener: { origin: opener.origin, text: opener.text } }
+              : {}),
             availableCredentialKeys: accounts.keys(),
           },
           { signal },
@@ -109,7 +124,25 @@ export async function runFlow(
           : parsed.data;
       span?.action(proposal.kind);
       signal.throwIfAborted();
+      if (proposal.kind === "opener") {
+        if (!popup)
+          throw new AuthFailure(
+            "invalid_proposal",
+            "There is no authentication popup to leave",
+          );
+        completedPopups.add(popup);
+        history.push(
+          "Returned from authentication popup to inspect the service page",
+        );
+        continue;
+      }
       if (proposal.kind === "session") {
+        // Native session selection ends the previous credential attempt, even
+        // when the user subsequently chooses a different existing account.
+        accounts = newAttempt();
+        accountsInitialized = false;
+        accountAction = undefined;
+        afterBack = false;
         const ids = proposal.choices.map((choice) => choice.elementId);
         if (new Set(ids).size !== ids.length || ids.includes("finish"))
           throw new AuthFailure(
@@ -142,27 +175,42 @@ export async function runFlow(
             "invalid_response",
             "No session choice was received",
           );
-        await surface.validateSession(signal);
-        if (answer.choiceId === "finish") {
-          result = { status: "already-signed-in" };
-          break;
+        const previousOperation: "login" | "logout" | "choose-account" =
+          operation;
+        try {
+          await surface.validateSession(signal);
+          if (answer.choiceId === "finish") {
+            result = { status: "already-signed-in" };
+            break;
+          }
+          const choice: Extract<
+            AuthProposal,
+            { kind: "session" }
+          >["choices"][number] = proposal.choices.find(
+            (entry) => entry.elementId === answer.choiceId,
+          )!;
+          operation = choice.kind === "logout" ? "logout" : "choose-account";
+          accountAction =
+            choice.kind === "switch" || choice.kind === "add"
+              ? choice.kind
+              : undefined;
+          phase = "browser_action";
+          await surface.click(choice.elementId, signal);
+          history.push(
+            `Selected ${choice.kind}: ${redactor.text(choice.label)}`,
+          );
+        } catch (error) {
+          // BrowserSurface emits stale_page only before attempting a write.
+          // Playwright write failures must never enter this refresh path.
+          if (!(error instanceof AuthFailure) || error.code !== "stale_page")
+            throw error;
+          operation = previousOperation;
+          accountAction = undefined;
+          history.push(
+            "Session changed before the choice was executed; inspect and offer fresh choices",
+          );
+          continue;
         }
-        const choice: Extract<
-          AuthProposal,
-          { kind: "session" }
-        >["choices"][number] = proposal.choices.find(
-          (entry) => entry.elementId === answer.choiceId,
-        )!;
-        // The existing page reference is revalidated before any selected action.
-        await surface.validate(choice.elementId, signal);
-        operation = choice.kind === "logout" ? "logout" : "choose-account";
-        accountAction =
-          choice.kind === "switch" || choice.kind === "add"
-            ? choice.kind
-            : undefined;
-        phase = "browser_action";
-        await surface.click(choice.elementId, signal);
-        history.push(`Selected ${choice.kind}: ${redactor.text(choice.label)}`);
         await delay(150, undefined, { signal });
         continue;
       }
@@ -188,7 +236,7 @@ export async function runFlow(
               : "authenticated";
         if (
           operation === "choose-account" &&
-          (!accountAction || proposal.outcome === "authenticated")
+          (!accountAction || afterBack || proposal.outcome === "authenticated")
         ) {
           result = {
             status: "unknown",
@@ -204,15 +252,9 @@ export async function runFlow(
         if (operation === "logout")
           result = { status: "signed-out", deletion: "not-requested" };
         else {
-          completedLogin = {
-            status: "authenticated",
-            save: { status: "not-saved" },
-          };
+          completedLogin = await accounts.save("never");
           phase = "store_save";
-          result = await accounts.save(
-            "save" in input ? (input.save ?? "ask") : "ask",
-            "label" in input ? input.label : undefined,
-          );
+          result = await accounts.save(input.save ?? "ask", input.label);
         }
         break;
       }
@@ -221,23 +263,21 @@ export async function runFlow(
         if (
           proposal.fields.length &&
           (operation === "logout" ||
-            (operation === "choose-account" && accountAction !== "add"))
+            (operation === "choose-account" && !accountAction))
         )
           throw new AuthFailure(
             "unsupported",
-            "Enter a native account flow before using credentials; logout cannot fall back to login",
+            "Choose a native account or add-account flow before entering credentials; logout cannot fall back to login",
           );
         if (proposal.fields.length && !accountsInitialized) {
           phase = "store_load";
-          await accounts.initialize(
-            "accountId" in input ? input.accountId : undefined,
-          );
+          await accounts.initialize(input.accountId);
           accountsInitialized = true;
           phase = "browser_action";
         }
         const filled = await accounts.fill(proposal, surface);
         history.push(filled.message);
-        if (filled.back) accountAction = undefined;
+        if (filled.progressed) afterBack = filled.back;
       } else if (proposal.kind === "click") {
         const element = observation.elements.find(
           (entry) => entry.id === proposal.elementId,
@@ -259,6 +299,7 @@ export async function runFlow(
         signal.throwIfAborted();
         if (answer?.kind === "choose") {
           await surface.click(answer.choiceId, signal);
+          afterBack = false;
           history.push(`Clicked ${redactor.text(element.label)}`);
         }
       } else if (proposal.kind === "external") {
@@ -278,12 +319,11 @@ export async function runFlow(
         signal.throwIfAborted();
         if (answer?.kind === "choose") {
           await surface.click(answer.choiceId, signal);
-          if (
+          afterBack = Boolean(
             proposal.choices.find(
               (choice) => choice.elementId === answer.choiceId,
-            )?.back
-          )
-            accountAction = undefined;
+            )?.back,
+          );
           history.push("Selected an external-flow choice");
         }
       }
@@ -344,6 +384,7 @@ export async function runFlow(
   }
   for (const page of watched) page.off("popup", onPopup);
   await surface?.clear().catch(() => {});
+  await openerSurface?.clear().catch(() => {});
   await connection?.disconnect().catch(() => {});
   redactor.clear();
   span?.end(result.status);

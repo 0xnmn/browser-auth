@@ -12,8 +12,9 @@ import type {
   AuthResponse,
   AuthResult,
 } from "../protocol.js";
-import type { AuthOptions, LoginOptions } from "../types.js";
+import type { AuthOptions } from "../types.js";
 import { validateOperationOptions } from "../options.js";
+import { AuthFailure } from "../errors.js";
 
 const MAX_INPUT = 256 * 1024;
 
@@ -43,6 +44,31 @@ const safe = (value: string): string =>
     .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
     .replace(/\s+/g, " ")
     .slice(0, 500);
+
+async function writeOutput(stream: Writable, value: string): Promise<void> {
+  if (stream.destroyed) throw new Error("output_failed");
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => stream.off("error", onError);
+    const finish = (error?: Error | null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      error ? reject(new Error("output_failed")) : resolve();
+    };
+    const onError = () => finish(new Error("output_failed"));
+    stream.once("error", onError);
+    try {
+      stream.write(value, (error) => {
+        // A write callback can precede an asynchronous error event. Keep the
+        // listener until that event so a broken pipe never escapes unhandled.
+        if (!error) finish();
+      });
+    } catch {
+      finish(new Error("output_failed"));
+    }
+  });
+}
 const defaultPrompts: CliPrompts = {
   input: (message, signal) => input({ message: safe(message) }, { signal }),
   secret: (message, signal) =>
@@ -290,73 +316,89 @@ async function renderInteractive(
 ): Promise<AuthResult> {
   let active:
     { id: string; controller: AbortController; cleanup(): void } | undefined;
-  for await (const snapshot of flow.updates()) {
-    if (snapshot.status !== "waiting") {
-      active?.controller.abort();
-      active?.cleanup();
-      active = undefined;
-    }
-    if (snapshot.status === "running")
-      deps.stdout.write(`${safe(snapshot.message)}\n`);
-    if (snapshot.status === "waiting") {
-      active?.controller.abort();
-      active?.cleanup();
-      const promptController = new AbortController();
-      const abort = () => promptController.abort();
-      controller.signal.addEventListener("abort", abort, { once: true });
-      const cleanup = () =>
-        controller.signal.removeEventListener("abort", abort);
-      active = {
-        id: snapshot.interaction.id,
-        controller: promptController,
-        cleanup,
-      };
-      if (
-        snapshot.interaction.kind === "external" &&
-        !snapshot.interaction.choices.length
-      ) {
-        deps.stdout.write(`${safe(snapshot.interaction.message)}\n`);
-        deps.stdout.write(
-          "No actions are currently available. Waiting for an update.\n",
-        );
-      } else
-        void answer(snapshot.interaction, deps.prompts, promptController.signal)
-          .then((response) => {
-            if (
-              promptController.signal.aborted ||
-              active?.id !== snapshot.interaction.id
-            )
-              return;
-            void flow.respond(response).catch((error: unknown) => {
+  try {
+    for await (const snapshot of flow.updates()) {
+      if (snapshot.status !== "waiting") {
+        active?.controller.abort();
+        active?.cleanup();
+        active = undefined;
+      }
+      if (snapshot.status === "running")
+        await writeOutput(deps.stdout, `${safe(snapshot.message)}\n`);
+      if (snapshot.status === "waiting") {
+        active?.controller.abort();
+        active?.cleanup();
+        const promptController = new AbortController();
+        const abort = () => promptController.abort();
+        controller.signal.addEventListener("abort", abort, { once: true });
+        const cleanup = () =>
+          controller.signal.removeEventListener("abort", abort);
+        active = {
+          id: snapshot.interaction.id,
+          controller: promptController,
+          cleanup,
+        };
+        if (
+          snapshot.interaction.kind === "external" &&
+          !snapshot.interaction.choices.length
+        ) {
+          await writeOutput(
+            deps.stdout,
+            `${safe(snapshot.interaction.message)}\n`,
+          );
+          await writeOutput(
+            deps.stdout,
+            "No actions are currently available. Waiting for an update.\n",
+          );
+        } else
+          void answer(
+            snapshot.interaction,
+            deps.prompts,
+            promptController.signal,
+          )
+            .then((response) => {
               if (
-                error instanceof Error &&
-                error.message === "stale_interaction"
-              ) {
-                deps.stderr.write("Stale response ignored.\n");
+                promptController.signal.aborted ||
+                active?.id !== snapshot.interaction.id
+              )
                 return;
-              }
-              deps.stderr.write(
-                "The response could not be accepted; cancelling the flow.\n",
-              );
-              controller.abort();
-            });
-          })
-          .catch(() => {
-            if (
-              !promptController.signal.aborted &&
-              active?.id === snapshot.interaction.id
-            )
-              controller.abort();
-          })
-          .finally(cleanup);
+              void flow.respond(response).catch((error: unknown) => {
+                if (
+                  error instanceof Error &&
+                  error.message === "stale_interaction"
+                ) {
+                  deps.stderr.write("Stale response ignored.\n");
+                  return;
+                }
+                deps.stderr.write(
+                  "The response could not be accepted; cancelling the flow.\n",
+                );
+                controller.abort();
+              });
+            })
+            .catch(() => {
+              if (
+                !promptController.signal.aborted &&
+                active?.id === snapshot.interaction.id
+              )
+                controller.abort();
+            })
+            .finally(cleanup);
+      }
+      if (snapshot.status === "done") {
+        active?.controller.abort();
+        active?.cleanup();
+        return snapshot.result;
+      }
     }
-    if (snapshot.status === "done") {
-      active?.controller.abort();
-      active?.cleanup();
-      return snapshot.result;
-    }
+    return await flow.result;
+  } catch {
+    active?.controller.abort();
+    active?.cleanup();
+    controller.abort();
+    await flow.result;
+    throw new Error("output_failed");
   }
-  return flow.result;
 }
 
 async function renderJson(
@@ -475,15 +517,46 @@ export async function runCli(
   overrides: Partial<CliDependencies> = {},
 ): Promise<number> {
   const deps = { ...defaults, ...overrides };
+  const output = new AbortController();
+  const onError = () => output.abort();
+  deps.stdout.on("error", onError);
+  try {
+    const result = await runCommand(argv, deps, output.signal);
+    return output.signal.aborted ? 1 : result;
+  } finally {
+    deps.stdout.off("error", onError);
+  }
+}
+
+async function runCommand(
+  argv: readonly string[],
+  deps: CliDependencies,
+  outputSignal: AbortSignal,
+): Promise<number> {
   if (argv[0] === "--help") {
-    deps.stdout.write(`${usage()}\n`);
-    return 0;
+    try {
+      await writeOutput(deps.stdout, `${usage()}\n`);
+      return 0;
+    } catch {
+      return 1;
+    }
   }
   let args: Parsed;
+  let phase: "config" | "account" | "input" | "login" = "config";
   try {
     args = parse(argv);
   } catch {
     deps.stderr.write(`${usage()}\n`);
+    if (argv.includes("--json")) {
+      try {
+        await writeOutput(
+          deps.stdout,
+          `${JSON.stringify({ status: "done", result: { status: "failed", error: { code: "invalid_command", message: "Invalid command syntax" } } })}\n`,
+        );
+      } catch {
+        /* Output is unavailable. */
+      }
+    }
     return 2;
   }
   try {
@@ -502,9 +575,13 @@ export async function runCli(
           },
     );
     if (args.command === "accounts") {
+      phase = "account";
       if (args.action === "remove") {
         await client.accounts.remove(args.id!);
-        deps.stdout.write(args.json ? '{"status":"removed"}\n' : "removed\n");
+        await writeOutput(
+          deps.stdout,
+          args.json ? '{"status":"removed"}\n' : "removed\n",
+        );
       } else {
         const query = {
           ...(args.values.has("--service-origin")
@@ -529,7 +606,8 @@ export async function runCli(
             credentialOrigins,
           }),
         );
-        deps.stdout.write(
+        await writeOutput(
+          deps.stdout,
           args.json
             ? `${JSON.stringify(rows)}\n`
             : rows
@@ -539,6 +617,7 @@ export async function runCli(
       }
       return 0;
     }
+    phase = "input";
     const fromFile = args.values.get("--input")
       ? await deps.loadInput(args.values.get("--input")!)
       : {};
@@ -578,11 +657,15 @@ export async function runCli(
     }
     const controller = new AbortController();
     operation.signal = controller.signal;
-    validateOperationOptions(operation);
+    const validated = validateOperationOptions(operation);
+    const onOutputError = () => controller.abort();
+    outputSignal.addEventListener("abort", onOutputError, { once: true });
+    if (outputSignal.aborted) controller.abort();
+    phase = "login";
     const onInterrupt = () => controller.abort();
     process.once("SIGINT", onInterrupt);
     try {
-      const flow = client.login(operation as unknown as LoginOptions);
+      const flow = client.login(validated);
       const result = await (args.json
         ? renderJson(flow, deps, controller)
         : renderInteractive(flow, deps, controller));
@@ -593,7 +676,9 @@ export async function runCli(
         deps.stderr.write(
           "Could not connect to Chrome. Start Chrome with --remote-debugging-port=9222 and a separate --user-data-dir, or set --cdp / BROWSER_AUTH_CDP_URL to an existing browser endpoint.\n",
         );
-      if (!args.json) deps.stdout.write(`${result.status}\n`);
+      if (!args.json) await writeOutput(deps.stdout, `${result.status}\n`);
+      if (!args.json && result.status === "unknown")
+        deps.stderr.write(`${safe(result.message)}\n`);
       if (!args.json && result.status === "failed")
         deps.stderr.write(
           `${safe(result.error.code)}: ${safe(result.error.message)}\n`,
@@ -621,12 +706,53 @@ export async function runCli(
             : 1;
     } finally {
       process.removeListener("SIGINT", onInterrupt);
+      outputSignal.removeEventListener("abort", onOutputError);
     }
   } catch (error) {
+    const knownCode =
+      error instanceof AuthFailure
+        ? error.code
+        : error instanceof Error &&
+            [
+              "invalid_auth_url",
+              "invalid_login_options",
+              "input_too_large",
+              "invalid_input",
+            ].includes(error.message)
+          ? error.message
+          : phase === "config"
+            ? "config_load_failed"
+            : phase === "input"
+              ? "input_load_failed"
+              : phase === "account"
+                ? "account_operation_failed"
+                : "cli_failed";
+    const messages: Record<string, string> = {
+      invalid_auth_url: "Invalid website URL",
+      invalid_login_options: "Invalid login options",
+      input_too_large: "Login input is too large",
+      invalid_input: "Invalid login input",
+      input_load_failed: "Login input could not be loaded",
+      config_load_failed: "Configuration could not be loaded",
+      account_list_failed: "Saved accounts could not be listed",
+      account_remove_failed: "The saved account could not be removed",
+      account_operation_failed: "The account operation could not finish",
+      cli_failed: "browser-auth could not finish safely",
+    };
+    if (args.json && !outputSignal.aborted) {
+      try {
+        await writeOutput(
+          deps.stdout,
+          `${JSON.stringify({ status: "done", result: { status: "failed", error: { code: knownCode, message: messages[knownCode] ?? messages.cli_failed } } })}\n`,
+        );
+      } catch {
+        // There is no remaining safe output channel.
+      }
+    }
     deps.stderr.write(
-      error instanceof Error && error.message === "invalid_auth_url"
+      knownCode === "invalid_auth_url"
         ? "Invalid website URL. Use an HTTPS URL such as https://example.com, without embedded credentials. HTTP is allowed only for loopback development.\n"
-        : "browser-auth could not start safely.\n",
+        : `${safe(messages[knownCode] ?? messages.cli_failed!)}.\n`,
     );
     return 1;
   }

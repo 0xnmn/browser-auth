@@ -454,6 +454,23 @@ describe("runCli", () => {
     expect(h.error()).toMatch(/^Usage:/);
   });
 
+  it("prints the safe reason for an uncertain outcome", async () => {
+    const h = harness(
+      flow([
+        {
+          status: "done",
+          result: {
+            status: "unknown",
+            message: "Inspect before retrying.\u001b[31m",
+          },
+        },
+      ]),
+    );
+    expect(await runCli(["login", "https://example.test"], h.deps)).toBe(1);
+    expect(h.error()).toContain("Inspect before retrying.");
+    expect(h.error()).not.toContain("\u001b");
+  });
+
   it("surfaces an oversized response without hanging on the still-pending interaction", async () => {
     const channel = new FlowChannel();
     const h = harness(channel);

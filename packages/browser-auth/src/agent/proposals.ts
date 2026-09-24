@@ -36,6 +36,7 @@ export type AuthProposal =
         | "not-signed-in"
         | "rejected";
     }
+  | { kind: "opener" }
   | { kind: "wait" };
 export type FormProposal = Extract<AuthProposal, { kind: "form" }>;
 
@@ -52,6 +53,8 @@ export interface AuthObservation {
   operation: "login" | "logout" | "choose-account";
   /** Completed actions, never credential values. */
   history?: string[];
+  /** Read-only service-page evidence while observing a popup. */
+  opener?: { origin: string; text: string };
   origin: string;
   text: string;
   elements: ObservedElement[];

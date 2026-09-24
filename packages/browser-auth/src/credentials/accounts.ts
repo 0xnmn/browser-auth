@@ -28,7 +28,7 @@ export async function confirm(
   return answer?.kind === "choose" && answer.choiceId === "yes";
 }
 
-/** Per-flow secrets. Never expose this object to the agent or event subscribers. */
+/** One credential attempt. Discard when returning to native session selection. */
 export class AccountSession {
   selected: SavedLogin | undefined;
   private readonly supplied: Record<string, string>;
@@ -37,6 +37,7 @@ export class AccountSession {
   private readonly attempted = new Set<string>();
   private readonly submitted = new Map<string, Record<string, string>>();
   private newAccount = false;
+  private usedSavedRecord = false;
 
   constructor(
     private readonly store: CredentialStore,
@@ -109,7 +110,7 @@ export class AccountSession {
   async fill(
     proposal: FormProposal,
     surface: BrowserSurface,
-  ): Promise<{ message: string; back: boolean }> {
+  ): Promise<{ message: string; back: boolean; progressed: boolean }> {
     if (
       new Set(proposal.fields.map((field) => field.elementId)).size !==
       proposal.fields.length
@@ -141,7 +142,15 @@ export class AccountSession {
         field.rejected || previousAttempt || field.type === "code"
           ? undefined
           : values[field.key];
-      bindings.push({ field, origin: ref.origin, value, stored: !!stored });
+      bindings.push({
+        field,
+        origin: ref.origin,
+        value,
+        stored: !!stored,
+        storedValue: stored
+          ? credentialValues(stored.values)[field.key]
+          : undefined,
+      });
     }
     const missing = bindings.filter((binding) => binding.value === undefined);
     const choices = proposal.choices.map((choice) => ({
@@ -176,6 +185,7 @@ export class AccountSession {
         return {
           message: `Selected ${choice.label}`,
           back: choice.kind === "back",
+          progressed: true,
         };
       }
       if (missing.length && answer?.kind !== "submit")
@@ -223,9 +233,11 @@ export class AccountSession {
       await surface.validate(binding.field.elementId, this.signal);
     if (proposal.submitElementId)
       await surface.validate(proposal.submitElementId, this.signal);
-    for (const { field, origin, value } of bindings) {
+    for (const { field, origin, value, storedValue } of bindings) {
       this.attempted.add(`${origin}:${field.key}`);
       await surface.fill(field.elementId, value!, origin, this.signal);
+      if (value !== undefined && value === storedValue)
+        this.usedSavedRecord = true;
       // Conservatively persist only known durable fields, never arbitrary model-labeled text.
       if (
         field.type !== "code" &&
@@ -238,7 +250,13 @@ export class AccountSession {
     }
     if (proposal.submitElementId)
       await surface.click(proposal.submitElementId, this.signal);
-    return { message: "Entered credentials in an observed form", back: false };
+    return {
+      message: bindings.length
+        ? "Entered credentials in an observed form"
+        : "No form action performed",
+      back: false,
+      progressed: bindings.length > 0,
+    };
   }
 
   async save(
@@ -248,6 +266,9 @@ export class AccountSession {
     const result: Extract<AuthResult, { status: "authenticated" }> = {
       status: "authenticated",
       save: { status: "not-saved" },
+      ...(this.usedSavedRecord && this.selected
+        ? { accountId: this.selected.id }
+        : {}),
     };
     if (mode === "never" || this.submitted.size === 0) return result;
     if (

@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import { createAuth } from "./auth.js";
 import { parseResponse, parseSnapshot } from "./protocol.js";
 import type { AuthOptions, LoginOptions, ModelConfig } from "./types.js";
+import { validateOperationOptions } from "./options.js";
 
 it("rejects library objects and invalid operation options before connecting", () => {
   const auth = createAuth({
@@ -44,6 +45,49 @@ it("rejects removed custom-agent configurations, including ones with a valid mod
     ).toThrow("Custom agents are not supported");
   }
 });
+
+it("returns an exact LoginOptions value without retaining undefined properties", () => {
+  const input = {
+    cdpUrl: "http://browser",
+    url: "https://site.test",
+    label: undefined,
+    credentials: { username: "person", password: undefined },
+  };
+  const validated: LoginOptions = validateOperationOptions(input);
+  expect(validated).toEqual({
+    cdpUrl: "http://browser",
+    url: "https://site.test",
+    credentials: { username: "person" },
+  });
+});
+
+it.each([
+  ["list", "account_list_failed", "Saved accounts could not be listed"],
+  ["remove", "account_remove_failed", "The saved account could not be removed"],
+] as const)(
+  "normalizes unsafe account %s store errors",
+  async (operation, code, message) => {
+    const auth = createAuth({
+      model: { provider: "openai", model: "fixture" },
+      store: {
+        list: async () => {
+          throw new Error("private store details");
+        },
+        get: async () => null,
+        save: async () => {},
+        delete: async () => {
+          throw new Error("private store details");
+        },
+      },
+    });
+    const call =
+      operation === "list"
+        ? auth.accounts.list()
+        : auth.accounts.remove("synthetic-account");
+    await expect(call).rejects.toMatchObject({ code, message });
+    await expect(call).rejects.not.toHaveProperty("cause");
+  },
+);
 
 it("public parsers return plain protocol values and fixed, payload-free errors", () => {
   expect(

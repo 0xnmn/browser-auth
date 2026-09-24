@@ -68,4 +68,5 @@ export const proposalSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
   z.object({ kind: z.literal("wait") }).strict(),
+  z.object({ kind: z.literal("opener") }).strict(),
 ]);
