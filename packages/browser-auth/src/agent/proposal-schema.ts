@@ -1,7 +1,11 @@
 import { z } from "zod";
 
 const reference = z.string().min(1).max(100);
-const element = { elementId: reference };
+const element = {
+  elementId: reference.describe(
+    "Copy the exact current observation elements[].id (full UUID), not an HTML id, field name, label, or selector.",
+  ),
+};
 export const proposalSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -38,7 +42,11 @@ export const proposalSchema = z.discriminatedUnion("kind", [
             .strict(),
         )
         .max(20),
-      submitElementId: reference.nullable(),
+      submitElementId: reference
+        .nullable()
+        .describe(
+          "Exact observed id of a native form submit control, or null. For non-submit Next/Continue buttons, fill first and use click in a later turn.",
+        ),
       external: z.boolean(),
     })
     .strict(),

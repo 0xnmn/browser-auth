@@ -50,6 +50,15 @@ it("uses real AI SDK tools without execute callbacks and validates the call", as
       expect.objectContaining({
         name: "click",
         description: expect.any(String),
+        inputSchema: expect.objectContaining({
+          properties: expect.objectContaining({
+            elementId: expect.objectContaining({
+              description: expect.stringContaining(
+                "exact current observation elements[].id",
+              ),
+            }),
+          }),
+        }),
       }),
     ]),
   );
