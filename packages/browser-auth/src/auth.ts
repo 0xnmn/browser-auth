@@ -36,15 +36,20 @@ export function createAuthWithAgent(
     void flow.result.then(() => {
       busy = false;
     });
-    void runFlow(validated, options, agent, store, flow).catch(() => {
-      flow.finish({
-        status: "failed",
-        error: {
-          code: "internal_error",
-          message: "Authentication could not finish safely",
-        },
-      });
-    });
+    // Give immediate transcript subscribers the first event, including failures
+    // before the first await. No pre-subscription event history is retained.
+    queueMicrotask(
+      () =>
+        void runFlow(validated, options, agent, store, flow).catch(() => {
+          flow.finish({
+            status: "failed",
+            error: {
+              code: "internal_error",
+              message: "Authentication could not finish safely",
+            },
+          });
+        }),
+    );
     return flow;
   }
 

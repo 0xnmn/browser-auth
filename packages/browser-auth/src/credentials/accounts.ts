@@ -3,7 +3,7 @@ import type { CredentialPlan } from "../agent/proposals.js";
 import type { BrowserSurface } from "../browser/observation.js";
 import type { FlowChannel } from "../flow/interaction.js";
 import type { AuthConfirmation, AuthResult } from "../protocol.js";
-import { AuthFailure, abortable } from "../errors.js";
+import { AuthFailure, abortable, actionTimeout } from "../errors.js";
 import type { Redactor } from "../security/redaction.js";
 import { credentialValues, toCredentials } from "./store.js";
 import type { CredentialStore, SavedLogin, Credentials } from "./store.js";
@@ -261,6 +261,7 @@ export class AccountSession {
         throw new AuthFailure(
           "partial_write",
           "Credential entry was interrupted after a browser write; do not replay the attempt",
+          actionTimeout(error),
         );
       throw error;
     }

@@ -2,16 +2,24 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { AccountSession } from "../credentials/accounts.js";
 import type { CredentialStore } from "../credentials/store.js";
+import { credentialValues } from "../credentials/store.js";
 import { BrowserSurface, type BrowserAction } from "../browser/observation.js";
 import { connectTarget } from "../browser/connection.js";
 import type { BrowserConnection } from "../browser/connection.js";
 import { BrowserSession } from "../browser/session.js";
-import { AuthFailure, abortable } from "../errors.js";
-import { Redactor } from "../security/redaction.js";
+import { AuthFailure, abortable, actionTimeout } from "../errors.js";
 import { proposalSchema } from "../agent/proposal-schema.js";
-import type { AuthAgent, AuthProposal } from "../agent/proposals.js";
+import type {
+  AuthAgent,
+  AuthProposal,
+  AuthObservation,
+} from "../agent/proposals.js";
 import type { AuthOptions, LoginOptions } from "../types.js";
 import type { AuthResult } from "../protocol.js";
+import type {
+  AuthTranscriptPhase,
+  AuthTranscriptValue,
+} from "../transcript.js";
 import { FlowChannel } from "./interaction.js";
 
 const browserActions = new Set<BrowserAction["kind"]>([
@@ -39,6 +47,7 @@ export async function runFlow(
   store: CredentialStore,
   flow: FlowChannel,
 ): Promise<void> {
+  flow.diagnostics.emit({ type: "start" });
   let operation: "login" | "logout" | "choose-account" = "login";
   const deadline = AbortSignal.timeout(options.limits?.timeoutMs ?? 180_000);
   const signal = input.signal
@@ -46,7 +55,9 @@ export async function runFlow(
     : deadline;
   const timeout = options.limits?.actionTimeoutMs ?? 10_000;
   const span = options.tracer?.startFlow(operation);
-  const redactor = new Redactor();
+  const redactor = flow.diagnostics.redactor;
+  for (const value of Object.values(credentialValues(input.credentials ?? {})))
+    redactor.add(value);
   let connection: BrowserConnection | undefined;
   let surface: BrowserSurface | undefined;
   let openerSurface: BrowserSurface | undefined;
@@ -57,9 +68,16 @@ export async function runFlow(
   let modelFailures = 0;
   let invalidReferences = 0;
   let result: AuthResult;
-  let phase = "browser_connect";
+  let phase: AuthTranscriptPhase = "browser_connect";
   let writeAttempted = false;
   let actionWriteAttempted = false;
+  // Diagnostic effect boundaries are distinct from legacy conservative outcome classification.
+  let diagnosticWriteAttempted = false;
+  let inController = false;
+  const noteWrite = () => {
+    diagnosticWriteAttempted = true;
+    actionWriteAttempted = true;
+  };
   let authProgress = false;
   let accountAction: "switch" | "add" | undefined;
   let afterBack = false;
@@ -67,9 +85,22 @@ export async function runFlow(
   let accountsInitialized = false;
   let completedLogin:
     Extract<AuthResult, { status: "authenticated" }> | undefined;
+  const reportError = (error: unknown) =>
+    flow.diagnostics.emit({
+      type: "error",
+      phase: phase === "agent" && inController ? "controller" : phase,
+      writeAttempted: diagnosticWriteAttempted,
+      actionWriteAttempted,
+      reason: input.signal?.aborted
+        ? "caller_cancelled"
+        : deadline.aborted
+          ? "deadline"
+          : (actionTimeout(error) ?? "failure"),
+      code: error instanceof AuthFailure ? error.code : `${phase}_failed`,
+    });
 
   try {
-    connection = await connectTarget(input, flow, signal, timeout);
+    connection = await connectTarget(input, flow, signal, timeout, noteWrite);
     currentPage = connection.page;
     browserSession = new BrowserSession(connection.context, connection.page);
     const serviceOrigin = connection.serviceOrigin;
@@ -86,6 +117,8 @@ export async function runFlow(
     let accounts = newAttempt();
 
     for (let step = 0; step < (options.limits?.maxSteps ?? 30);) {
+      actionWriteAttempted = false;
+      inController = false;
       signal.throwIfAborted();
       if (browserSession.nativeDialogSeen)
         throw new AuthFailure(
@@ -103,7 +136,7 @@ export async function runFlow(
               "Native browser dialogs are not supported",
             );
           writeAttempted = true;
-          actionWriteAttempted = true;
+          noteWrite();
         });
       }
       flow.publish({
@@ -156,24 +189,24 @@ export async function runFlow(
       span?.step(step);
       step++;
       phase = "agent";
+      const agentInput: AuthObservation = {
+        ...observation,
+        operation,
+        history,
+        ...(opener
+          ? { opener: { origin: opener.origin, text: opener.text } }
+          : {}),
+        ...(contextResult ? { context: contextResult } : {}),
+        availableCredentialKeys: accounts.keys(),
+      };
+      flow.diagnostics.emit({
+        type: "observation",
+        step,
+        observation: agentInput,
+      });
       let proposed: AuthProposal;
       try {
-        proposed = await abortable(
-          agent.next(
-            {
-              ...observation,
-              operation,
-              history,
-              ...(opener
-                ? { opener: { origin: opener.origin, text: opener.text } }
-                : {}),
-              ...(contextResult ? { context: contextResult } : {}),
-              availableCredentialKeys: accounts.keys(),
-            },
-            { signal },
-          ),
-          signal,
-        );
+        proposed = await abortable(agent.next(agentInput, { signal }), signal);
         modelFailures = 0;
       } catch (error) {
         if (
@@ -183,6 +216,7 @@ export async function runFlow(
           ) &&
           ++modelFailures <= 2
         ) {
+          reportError(error);
           flow.publish({
             status: "running",
             message:
@@ -200,350 +234,402 @@ export async function runFlow(
           "The agent returned an invalid action",
         );
       const proposal = parsed.data as AuthProposal;
-      contextResult = undefined;
-      const references =
-        proposal.kind === "ask_user"
-          ? [
-              ...proposal.fields.map((field) => field.elementId),
-              ...proposal.choices
-                .filter((choice) => choice.intent !== "finish")
-                .map((choice) => choice.elementId),
-              ...(proposal.submitElementId ? [proposal.submitElementId] : []),
-            ]
-          : proposal.kind === "drag"
-            ? [proposal.sourceElementId, proposal.targetElementId]
-            : "elementId" in proposal && proposal.elementId
-              ? [proposal.elementId]
-              : [];
-      const observedIds = new Set(
-        observation.elements.map((element) => element.id),
-      );
-      if (references.some((id) => !observedIds.has(id))) {
-        if (++invalidReferences >= 3)
-          throw new AuthFailure(
-            "invalid_element_reference",
-            "The model repeatedly requested controls absent from the current observation",
-          );
-        contextResult =
-          "No action was performed: a proposed element reference was not in the observation. Copy exact current elements[].id values; do not invent identifiers.";
-        continue;
-      }
-      invalidReferences = 0;
-      span?.action(proposal.kind);
-      signal.throwIfAborted();
-      if (browserSession.nativeDialogSeen)
-        throw new AuthFailure(
-          "native_dialog_unsupported",
-          "Native browser dialogs are not supported",
+      flow.diagnostics.emit({ type: "proposal", step, proposal });
+      inController = true;
+      let executionStatus: "completed" | "rejected" | "failed" = "completed";
+      let executionReason: string | undefined;
+      let executionResult: AuthTranscriptValue | undefined;
+      try {
+        contextResult = undefined;
+        const references =
+          proposal.kind === "ask_user"
+            ? [
+                ...proposal.fields.map((field) => field.elementId),
+                ...proposal.choices
+                  .filter((choice) => choice.intent !== "finish")
+                  .map((choice) => choice.elementId),
+                ...(proposal.submitElementId ? [proposal.submitElementId] : []),
+              ]
+            : proposal.kind === "drag"
+              ? [proposal.sourceElementId, proposal.targetElementId]
+              : "elementId" in proposal && proposal.elementId
+                ? [proposal.elementId]
+                : [];
+        const observedIds = new Set(
+          observation.elements.map((element) => element.id),
         );
-
-      if (proposal.kind === "opener") {
-        if (page === connection.page)
-          throw new AuthFailure(
-            "invalid_proposal",
-            "There is no authentication popup to leave",
-          );
-        const initial = browserSession.list().find((entry) => !entry.openerId);
-        if (!initial)
-          throw new AuthFailure(
-            "target_closed",
-            "The selected browser tab was closed",
-          );
-        browserSession.switch(initial.id);
-        history.push("Action: opener");
-        continue;
-      }
-
-      if (proposal.kind === "tabs_list") {
-        contextResult = JSON.stringify({ tabs: browserSession.list() });
-        continue;
-      }
-      if (proposal.kind === "tab_switch") {
-        browserSession.switch(proposal.pageId);
-        history.push("Action: tab_switch");
-        continue;
-      }
-      if (proposal.kind === "tab_new") {
-        phase = "browser_action";
-        writeAttempted = true;
-        contextResult = JSON.stringify({
-          pageId: await browserSession.create(),
-        });
-        history.push("Action: tab_new");
-        continue;
-      }
-      if (proposal.kind === "tab_close") {
-        phase = "browser_action";
-        writeAttempted = true;
-        await browserSession.close(proposal.pageId);
-        history.push("Action: tab_close");
-        continue;
-      }
-      if (proposal.kind === "frames_list") {
-        contextResult = JSON.stringify({ frames: browserSession.frames() });
-        continue;
-      }
-      if (proposal.kind === "observe" || proposal.kind === "screenshot") {
-        history.push(`Action: ${proposal.kind}`);
-        continue;
-      }
-
-      if (proposal.kind === "done") {
-        if (
-          proposal.outcome === "authenticated" &&
-          operation === "login" &&
-          !authProgress
-        ) {
-          const answer = await flow.ask(
-            {
-              message: "A signed-in session is already active",
-              fields: [],
-              choices: [
-                {
-                  id: "finish",
-                  label: "Keep this session and finish",
-                  kind: "finish",
-                },
-              ],
-            },
-            signal,
-          );
-          signal.throwIfAborted();
-          if (answer?.kind !== "choose" || answer.choiceId !== "finish")
+        if (references.some((id) => !observedIds.has(id))) {
+          executionStatus = "rejected";
+          executionReason = "invalid_element_reference";
+          if (++invalidReferences >= 3)
             throw new AuthFailure(
-              "invalid_response",
-              "No session choice was received",
+              "invalid_element_reference",
+              "The model repeatedly requested controls absent from the current observation",
             );
-          await surface.validateSession(signal);
-          if (browserSession.nativeDialogSeen)
-            throw new AuthFailure(
-              "native_dialog_unsupported",
-              "Native browser dialogs are not supported",
-            );
-          result = { status: "already-signed-in" };
-          break;
-        }
-        if (
-          proposal.outcome === "unsupported" ||
-          proposal.outcome === "rejected" ||
-          proposal.outcome === "not-signed-in"
-        )
-          throw new AuthFailure(
-            proposal.outcome,
-            proposal.outcome === "unsupported"
-              ? "This authentication action is not supported by the current website flow"
-              : proposal.outcome === "not-signed-in"
-                ? "A signed-in session is required to choose another account. Log in first."
-                : "The website rejected authentication",
-          );
-        if (proposal.outcome === "account-changed" && !accountAction) {
-          result = {
-            status: "unknown",
-            message: "The requested account change was not observed",
-          };
-          break;
-        }
-        const expected =
-          operation === "logout"
-            ? "signed-out"
-            : operation === "choose-account"
-              ? "account-changed"
-              : "authenticated";
-        if (
-          operation === "choose-account" &&
-          (!accountAction || afterBack || proposal.outcome === "authenticated")
-        ) {
-          result = {
-            status: "unknown",
-            message: "The requested account change was not observed",
-          };
-          break;
-        }
-        if (proposal.outcome !== expected)
-          throw new AuthFailure(
-            "invalid_outcome",
-            "The agent returned an outcome for a different operation",
-          );
-        try {
-          await surface.validateSession(signal);
-        } catch (error) {
-          if (!(error instanceof AuthFailure) || error.code !== "stale_page")
-            throw error;
-          history.push("Action: stale-completion; observe again");
+          contextResult =
+            "No action was performed: a proposed element reference was not in the observation. Copy exact current elements[].id values; do not invent identifiers.";
           continue;
         }
+        invalidReferences = 0;
+        span?.action(proposal.kind);
+        signal.throwIfAborted();
         if (browserSession.nativeDialogSeen)
           throw new AuthFailure(
             "native_dialog_unsupported",
             "Native browser dialogs are not supported",
           );
-        if (operation === "logout")
-          result = { status: "signed-out", deletion: "not-requested" };
-        else {
-          completedLogin = await accounts.save("never");
-          phase = "store_save";
-          result = await accounts.save(input.save ?? "ask", input.label);
-        }
-        break;
-      }
 
-      if (proposal.kind === "ask_user") {
-        phase = "browser_action";
-        if (!proposal.fields.length && proposal.submitElementId)
-          throw new AuthFailure(
-            "invalid_submit",
-            "A submit control requires credential fields",
-          );
-        const native = proposal.choices.some((choice) =>
-          ["finish", "switch", "add", "logout"].includes(choice.intent),
-        );
-        if (proposal.fields.length && native)
-          throw new AuthFailure(
-            "invalid_proposal",
-            "Session decisions cannot be mixed with credential fields",
-          );
-        if (
-          proposal.fields.length &&
-          (operation === "logout" ||
-            (operation === "choose-account" && !accountAction))
-        )
-          throw new AuthFailure(
-            "unsupported",
-            "Choose a native account or add-account flow before entering credentials; logout cannot fall back to login",
-          );
-        if (native) {
-          accounts = newAttempt();
-          accountsInitialized = false;
-          accountAction = undefined;
-          afterBack = false;
-          authProgress = false;
-        }
-        if (proposal.fields.length) {
-          for (const field of proposal.fields)
-            await surface.validate(field.elementId, signal);
-          if (!accountsInitialized) {
-            phase = "store_load";
-            await accounts.initialize(input.accountId);
-            accountsInitialized = true;
-            phase = "browser_action";
-          }
-          const filled = await accounts.fill(proposal, surface);
-          history.push(filled.message);
-          if (filled.progressed) {
-            afterBack = filled.back;
-            if (!filled.back) {
-              authProgress = true;
-              for (const field of proposal.fields)
-                history.push(`Field receipt: ${field.key} (${field.type})`);
-            }
-          }
-        } else if (proposal.choices.length || proposal.external) {
-          const ids = proposal.choices.map((choice) => choice.elementId);
-          if (new Set(ids).size !== ids.length)
+        if (proposal.kind === "opener") {
+          if (page === connection.page)
             throw new AuthFailure(
               "invalid_proposal",
-              "The agent returned duplicate choices",
+              "There is no authentication popup to leave",
             );
-          for (const choice of proposal.choices)
-            if (choice.intent !== "finish")
-              await surface.validate(choice.elementId, signal);
-          const answer = await flow.ask(
-            {
-              message: redactor.text(proposal.message),
-              fields: [],
-              choices: proposal.choices.map((choice) => ({
-                id: choice.elementId,
-                label: redactor.text(choice.label),
-                ...(choice.intent === "continue"
-                  ? {}
-                  : { kind: choice.intent }),
-              })),
-            },
-            signal,
-            proposal.external ? 1500 : undefined,
-          );
-          signal.throwIfAborted();
-          if (proposal.external && operation === "login") authProgress = true;
-          if (proposal.external && !proposal.choices.length && answer === null)
-            externalWait = {
-              fingerprint,
-              message: redactor.text(proposal.message),
-            };
-          if (answer?.kind === "choose") {
-            const choice = proposal.choices.find(
-              (entry) => entry.elementId === answer.choiceId,
-            )!;
-            const previousOperation: "login" | "logout" | "choose-account" =
-              operation;
-            const previousAccountAction = accountAction;
-            try {
-              await surface.validateSession(signal);
-              if (browserSession.nativeDialogSeen)
-                throw new AuthFailure(
-                  "native_dialog_unsupported",
-                  "Native browser dialogs are not supported",
-                );
-              if (choice.intent === "finish") {
-                result = { status: "already-signed-in" };
-                break;
-              }
-              await surface.validate(choice.elementId, signal);
-              if (choice.intent === "logout") operation = "logout";
-              else if (choice.intent === "switch" || choice.intent === "add") {
-                operation = "choose-account";
-                accountAction = choice.intent;
-              }
-              await surface.click(choice.elementId, signal);
-              afterBack = choice.intent === "back";
-              if (choice.intent === "continue") authProgress = true;
-              history.push(`Action: ${choice.intent}`);
-            } catch (error) {
-              if (
-                !(error instanceof AuthFailure) ||
-                error.code !== "stale_page"
-              )
-                throw error;
-              operation = previousOperation;
-              accountAction = previousAccountAction;
-              history.push("Action: stale-choice");
-              continue;
-            }
-          }
-        } else {
-          history.push("Action: no-op");
-        }
-        await delay(150, undefined, { signal });
-        continue;
-      }
-
-      if (browserActions.has(proposal.kind as BrowserAction["kind"])) {
-        phase = "browser_action";
-        const action = proposal as BrowserAction;
-        actionWriteAttempted = false;
-        const executed = await surface
-          .execute(action, signal)
-          .catch((error: unknown) => {
-            if (
-              error instanceof AuthFailure &&
-              error.code === "stale_page" &&
-              !actionWriteAttempted
-            )
-              return null;
-            throw error;
-          });
-        if (!executed) {
-          contextResult =
-            "The page changed before dispatch. No browser write was attempted; inspect the fresh observation and choose the next action.";
+          const initial = browserSession
+            .list()
+            .find((entry) => !entry.openerId);
+          if (!initial)
+            throw new AuthFailure(
+              "target_closed",
+              "The selected browser tab was closed",
+            );
+          browserSession.switch(initial.id);
+          history.push("Action: opener");
           continue;
         }
-        if (action.kind === "click" && afterBack && accountAction === "add")
-          afterBack = false;
-        if (executed.kind === "inspection")
-          history.push(
-            `Action: inspect; ${redactor.text(JSON.stringify(executed))}`,
+
+        if (proposal.kind === "tabs_list") {
+          contextResult = JSON.stringify({ tabs: browserSession.list() });
+          continue;
+        }
+        if (proposal.kind === "tab_switch") {
+          browserSession.switch(proposal.pageId);
+          history.push("Action: tab_switch");
+          continue;
+        }
+        if (proposal.kind === "tab_new") {
+          phase = "browser_action";
+          writeAttempted = true;
+          noteWrite();
+          contextResult = JSON.stringify({
+            pageId: await browserSession.create(),
+          });
+          history.push("Action: tab_new");
+          continue;
+        }
+        if (proposal.kind === "tab_close") {
+          phase = "browser_action";
+          writeAttempted = true;
+          await browserSession.close(proposal.pageId, noteWrite);
+          history.push("Action: tab_close");
+          continue;
+        }
+        if (proposal.kind === "frames_list") {
+          contextResult = JSON.stringify({ frames: browserSession.frames() });
+          continue;
+        }
+        if (proposal.kind === "observe" || proposal.kind === "screenshot") {
+          history.push(`Action: ${proposal.kind}`);
+          continue;
+        }
+
+        if (proposal.kind === "done") {
+          if (
+            proposal.outcome === "authenticated" &&
+            operation === "login" &&
+            !authProgress
+          ) {
+            const answer = await flow.ask(
+              {
+                message: "A signed-in session is already active",
+                fields: [],
+                choices: [
+                  {
+                    id: "finish",
+                    label: "Keep this session and finish",
+                    kind: "finish",
+                  },
+                ],
+              },
+              signal,
+            );
+            signal.throwIfAborted();
+            if (answer?.kind !== "choose" || answer.choiceId !== "finish")
+              throw new AuthFailure(
+                "invalid_response",
+                "No session choice was received",
+              );
+            await surface.validateSession(signal);
+            if (browserSession.nativeDialogSeen)
+              throw new AuthFailure(
+                "native_dialog_unsupported",
+                "Native browser dialogs are not supported",
+              );
+            result = { status: "already-signed-in" };
+            break;
+          }
+          if (
+            proposal.outcome === "unsupported" ||
+            proposal.outcome === "rejected" ||
+            proposal.outcome === "not-signed-in"
+          )
+            throw new AuthFailure(
+              proposal.outcome,
+              proposal.outcome === "unsupported"
+                ? "This authentication action is not supported by the current website flow"
+                : proposal.outcome === "not-signed-in"
+                  ? "A signed-in session is required to choose another account. Log in first."
+                  : "The website rejected authentication",
+            );
+          if (proposal.outcome === "account-changed" && !accountAction) {
+            executionStatus = "rejected";
+            executionReason = "account_change_not_observed";
+            result = {
+              status: "unknown",
+              message: "The requested account change was not observed",
+            };
+            break;
+          }
+          const expected =
+            operation === "logout"
+              ? "signed-out"
+              : operation === "choose-account"
+                ? "account-changed"
+                : "authenticated";
+          if (
+            operation === "choose-account" &&
+            (!accountAction ||
+              afterBack ||
+              proposal.outcome === "authenticated")
+          ) {
+            executionStatus = "rejected";
+            executionReason = "account_change_not_observed";
+            result = {
+              status: "unknown",
+              message: "The requested account change was not observed",
+            };
+            break;
+          }
+          if (proposal.outcome !== expected)
+            throw new AuthFailure(
+              "invalid_outcome",
+              "The agent returned an outcome for a different operation",
+            );
+          try {
+            await surface.validateSession(signal);
+          } catch (error) {
+            if (!(error instanceof AuthFailure) || error.code !== "stale_page")
+              throw error;
+            executionStatus = "rejected";
+            executionReason = "stale_page";
+            history.push("Action: stale-completion; observe again");
+            continue;
+          }
+          if (browserSession.nativeDialogSeen)
+            throw new AuthFailure(
+              "native_dialog_unsupported",
+              "Native browser dialogs are not supported",
+            );
+          if (operation === "logout")
+            result = { status: "signed-out", deletion: "not-requested" };
+          else {
+            completedLogin = await accounts.save("never");
+            phase = "store_save";
+            result = await accounts.save(input.save ?? "ask", input.label);
+          }
+          break;
+        }
+
+        if (proposal.kind === "ask_user") {
+          phase = "browser_action";
+          if (!proposal.fields.length && proposal.submitElementId)
+            throw new AuthFailure(
+              "invalid_submit",
+              "A submit control requires credential fields",
+            );
+          const native = proposal.choices.some((choice) =>
+            ["finish", "switch", "add", "logout"].includes(choice.intent),
           );
-        else history.push(`Action: ${action.kind}`);
-        await delay(150, undefined, { signal });
+          if (proposal.fields.length && native)
+            throw new AuthFailure(
+              "invalid_proposal",
+              "Session decisions cannot be mixed with credential fields",
+            );
+          if (
+            proposal.fields.length &&
+            (operation === "logout" ||
+              (operation === "choose-account" && !accountAction))
+          )
+            throw new AuthFailure(
+              "unsupported",
+              "Choose a native account or add-account flow before entering credentials; logout cannot fall back to login",
+            );
+          if (native) {
+            accounts = newAttempt();
+            accountsInitialized = false;
+            accountAction = undefined;
+            afterBack = false;
+            authProgress = false;
+          }
+          if (proposal.fields.length) {
+            for (const field of proposal.fields)
+              await surface.validate(field.elementId, signal);
+            if (!accountsInitialized) {
+              phase = "store_load";
+              await accounts.initialize(input.accountId);
+              accountsInitialized = true;
+              phase = "browser_action";
+            }
+            const filled = await accounts.fill(proposal, surface);
+            executionResult = filled;
+            history.push(filled.message);
+            if (filled.progressed) {
+              afterBack = filled.back;
+              if (!filled.back) {
+                authProgress = true;
+                for (const field of proposal.fields)
+                  history.push(`Field receipt: ${field.key} (${field.type})`);
+              }
+            }
+          } else if (proposal.choices.length || proposal.external) {
+            const ids = proposal.choices.map((choice) => choice.elementId);
+            if (new Set(ids).size !== ids.length)
+              throw new AuthFailure(
+                "invalid_proposal",
+                "The agent returned duplicate choices",
+              );
+            for (const choice of proposal.choices)
+              if (choice.intent !== "finish")
+                await surface.validate(choice.elementId, signal);
+            const answer = await flow.ask(
+              {
+                message: redactor.text(proposal.message),
+                fields: [],
+                choices: proposal.choices.map((choice) => ({
+                  id: choice.elementId,
+                  label: redactor.text(choice.label),
+                  ...(choice.intent === "continue"
+                    ? {}
+                    : { kind: choice.intent }),
+                })),
+              },
+              signal,
+              proposal.external ? 1500 : undefined,
+            );
+            signal.throwIfAborted();
+            if (proposal.external && operation === "login") authProgress = true;
+            if (
+              proposal.external &&
+              !proposal.choices.length &&
+              answer === null
+            )
+              externalWait = {
+                fingerprint,
+                message: redactor.text(proposal.message),
+              };
+            if (answer?.kind === "choose") {
+              const choice = proposal.choices.find(
+                (entry) => entry.elementId === answer.choiceId,
+              )!;
+              const previousOperation: "login" | "logout" | "choose-account" =
+                operation;
+              const previousAccountAction = accountAction;
+              try {
+                await surface.validateSession(signal);
+                if (browserSession.nativeDialogSeen)
+                  throw new AuthFailure(
+                    "native_dialog_unsupported",
+                    "Native browser dialogs are not supported",
+                  );
+                if (choice.intent === "finish") {
+                  result = { status: "already-signed-in" };
+                  break;
+                }
+                await surface.validate(choice.elementId, signal);
+                if (choice.intent === "logout") operation = "logout";
+                else if (
+                  choice.intent === "switch" ||
+                  choice.intent === "add"
+                ) {
+                  operation = "choose-account";
+                  accountAction = choice.intent;
+                }
+                await surface.click(choice.elementId, signal);
+                afterBack = choice.intent === "back";
+                if (choice.intent === "continue") authProgress = true;
+                history.push(`Action: ${choice.intent}`);
+              } catch (error) {
+                if (
+                  !(error instanceof AuthFailure) ||
+                  error.code !== "stale_page"
+                )
+                  throw error;
+                operation = previousOperation;
+                accountAction = previousAccountAction;
+                executionStatus = "rejected";
+                executionReason = "stale_page";
+                history.push("Action: stale-choice");
+                continue;
+              }
+            }
+          } else {
+            history.push("Action: no-op");
+          }
+          await delay(150, undefined, { signal });
+          continue;
+        }
+
+        if (browserActions.has(proposal.kind as BrowserAction["kind"])) {
+          phase = "browser_action";
+          const action = proposal as BrowserAction;
+          actionWriteAttempted = false;
+          const executed = await surface
+            .execute(action, signal)
+            .catch((error: unknown) => {
+              if (
+                error instanceof AuthFailure &&
+                error.code === "stale_page" &&
+                !actionWriteAttempted
+              )
+                return null;
+              throw error;
+            });
+          if (!executed) {
+            executionStatus = "rejected";
+            executionReason = "stale_page";
+            contextResult =
+              "The page changed before dispatch. No browser write was attempted; inspect the fresh observation and choose the next action.";
+            continue;
+          }
+          if (action.kind === "click" && afterBack && accountAction === "add")
+            afterBack = false;
+          executionResult = executed as AuthTranscriptValue;
+          if (executed.kind === "inspection")
+            history.push(
+              `Action: inspect; ${redactor.text(JSON.stringify(executed))}`,
+            );
+          else history.push(`Action: ${action.kind}`);
+          await delay(150, undefined, { signal });
+        }
+      } catch (error) {
+        if (executionStatus !== "rejected") executionStatus = "failed";
+        executionReason ??=
+          error instanceof AuthFailure ? error.code : "execution_failed";
+        throw error;
+      } finally {
+        flow.diagnostics.emit({
+          type: "execution",
+          step,
+          tool: proposal.kind,
+          status: executionStatus,
+          writeAttempted: actionWriteAttempted,
+          ...(executionReason ? { reason: executionReason } : {}),
+          ...(executionResult !== undefined
+            ? { result: executionResult }
+            : contextResult
+              ? { result: contextResult }
+              : {}),
+        });
       }
     }
     result ??= {
@@ -551,6 +637,7 @@ export async function runFlow(
       message: "The authentication step limit was reached",
     };
   } catch (error) {
+    reportError(error);
     if (completedLogin) result = completedLogin;
     else if (browserSession?.nativeDialogSeen)
       result = {
@@ -602,7 +689,9 @@ export async function runFlow(
     try {
       await store.delete(input.accountId);
       result = { ...result, deletion: "deleted" };
-    } catch {
+    } catch (error) {
+      phase = "store_delete";
+      reportError(error);
       result = { ...result, deletion: "failed" };
     }
   }
@@ -610,7 +699,6 @@ export async function runFlow(
   await surface?.clear().catch(() => {});
   await openerSurface?.clear().catch(() => {});
   await connection?.disconnect().catch(() => {});
-  redactor.clear();
   span?.end(result.status);
   flow.finish(result);
 }

@@ -17,6 +17,7 @@ export async function connectTarget(
   flow: FlowChannel,
   signal: AbortSignal,
   timeout: number,
+  onWrite: () => void = () => {},
 ): Promise<BrowserConnection> {
   signal.throwIfAborted();
   const serviceOrigin = originOf(target.url);
@@ -84,6 +85,7 @@ export async function connectTarget(
       if (answer?.kind === "choose") page = matches[Number(answer.choiceId)];
     } else page = matches[0];
     if (!page) {
+      onWrite();
       page = await context.newPage();
       signal.throwIfAborted();
       await page.goto(target.url, { waitUntil: "domcontentloaded", timeout });

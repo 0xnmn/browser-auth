@@ -102,7 +102,7 @@ export class BrowserSession {
     return this.pages.get(page)!.id;
   }
 
-  async close(id: string): Promise<void> {
+  async close(id: string, onWrite: () => void = () => {}): Promise<void> {
     const page = this.find(id);
     const entry = this.pages.get(page)!;
     if (!entry.owned)
@@ -110,6 +110,7 @@ export class BrowserSession {
         "page_not_owned",
         "Only tabs created by this authentication flow can be closed",
       );
+    onWrite();
     await page.close({ runBeforeUnload: false });
     if (this.explicit === page) this.explicit = undefined;
   }

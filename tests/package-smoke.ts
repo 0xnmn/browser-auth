@@ -95,9 +95,35 @@ try {
   }
   await writeFile(
     join(directory, "consumer.mts"),
-    `import { createAuth, type AuthOptions, type AuthResult } from '@browser-auth/core';
+    `import { createAuth, type AuthOptions, type AuthResult, type AuthFlow, type AuthTranscriptEvent } from '@browser-auth/core';
 import { parseSnapshot } from '@browser-auth/core/protocol';
+import type { AuthTranscriptEvent as ProtocolTranscriptEvent } from '@browser-auth/core/protocol';
 const options = { model: {provider:'openai',model:'example-model'} } satisfies AuthOptions;
+async function transcriptConsumer(flow: AuthFlow) {
+  const stream: AsyncIterable<AuthTranscriptEvent> = flow.transcript();
+  for await (const event of stream) {
+    const wire: ProtocolTranscriptEvent = event;
+    if (event.type === 'observation') {
+      const image: string | undefined = event.observation.screenshot?.data;
+      void image;
+    }
+    if (event.type === 'proposal' && event.proposal.kind === 'click') {
+      const ref: string = event.proposal.elementId;
+      void ref;
+    }
+    if (event.type === 'response' && event.response.kind === 'submit') {
+      const ids: string[] = event.response.fieldIds;
+      // @ts-expect-error Transcript responses never expose credential values.
+      event.response.values;
+      void ids;
+    }
+    void wire;
+  }
+}
+// @ts-expect-error Transcript is on the flow, not a configuration toggle.
+createAuth({...options,transcript:true});
+// @ts-expect-error Screenshot defaults are not caller configuration.
+createAuth({...options,screenshots:true});
 // @ts-expect-error Custom agents are internal, not configuration.
 createAuth({...options,agent:{async next(){return {kind:'wait'};}}});
 // @ts-expect-error Agent contracts are not public exports.

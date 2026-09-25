@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ElementHandle, Frame, Page } from "playwright-core";
-import { AuthFailure } from "../errors.js";
+import { AuthFailure, actionTimeout } from "../errors.js";
 import { originOf } from "../security/origins.js";
 import type { Redactor } from "../security/redaction.js";
 
@@ -703,6 +703,7 @@ export class BrowserSurface {
       throw new AuthFailure(
         "browser_action_failed",
         "The browser action did not complete",
+        actionTimeout(error),
       );
     }
   }

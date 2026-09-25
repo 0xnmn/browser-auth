@@ -3,10 +3,20 @@ export class AuthFailure extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly reason?: "action_timeout" | undefined,
   ) {
     super(message);
     this.name = "AuthFailure";
   }
+}
+
+/** Preserve a fixed diagnostic category, never the underlying exception. */
+export function actionTimeout(error: unknown): "action_timeout" | undefined {
+  return error instanceof AuthFailure
+    ? error.reason
+    : error instanceof Error && error.name === "TimeoutError"
+      ? "action_timeout"
+      : undefined;
 }
 
 export async function abortable<T>(

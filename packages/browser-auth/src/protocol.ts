@@ -4,6 +4,16 @@ import {
   responseSchema,
   snapshotSchema,
 } from "./flow/protocol-schema.js";
+import type { AuthTranscriptEvent } from "./transcript.js";
+export type {
+  AuthTranscriptEvent,
+  AuthTranscriptObservation,
+  AuthTranscriptProposal,
+  AuthTranscriptValue,
+  AuthTranscriptResponse,
+  AuthTranscriptPhase,
+  AuthTranscriptFailure,
+} from "./transcript.js";
 
 export interface AuthError {
   code: string;
@@ -68,6 +78,8 @@ export type AuthSnapshot =
 
 export interface AuthFlow {
   updates(): AsyncIterable<AuthSnapshot>;
+  /** Live, bounded diagnostics; subscribe immediately. No replay of earlier events. */
+  transcript(): AsyncIterable<AuthTranscriptEvent>;
   respond(response: AuthResponse): Promise<void>;
   readonly result: Promise<AuthResult>;
 }

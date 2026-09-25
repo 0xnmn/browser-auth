@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -11,6 +11,7 @@ import { launchSharedBrowser } from "../helpers/browser.js";
 import { startAuthSite, fixturePassword } from "../fixtures/auth-site.js";
 import { defaultResponse } from "../helpers/respond.js";
 import { parseSnapshot } from "../../packages/browser-auth/src/protocol.js";
+import type { AuthTranscriptEvent } from "../../packages/browser-auth/src/protocol.js";
 import { FixtureAgent } from "../helpers/scripted-agent.js";
 
 it("runs the CLI subprocess end-to-end against an existing CDP browser using JSONL", async () => {
@@ -39,13 +40,11 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
         )
       ) {
         transientFailures++;
-        response
-          .writeHead(503, { "content-type": "application/json" })
-          .end(
-            JSON.stringify({
-              error: { message: "Synthetic transient failure" },
-            }),
-          );
+        response.writeHead(503, { "content-type": "application/json" }).end(
+          JSON.stringify({
+            error: { message: "Synthetic transient failure" },
+          }),
+        );
         return;
       }
       const proposal = await agent.next(observation);
@@ -121,6 +120,8 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
         "--input",
         input,
         "--json",
+        "--transcript",
+        join(directory, "transcript.jsonl"),
       ],
       { cwd: root, stdio: ["pipe", "pipe", "pipe"] },
     );
@@ -159,6 +160,27 @@ it("runs the CLI subprocess end-to-end against an existing CDP browser using JSO
       result: { status: "authenticated" },
     });
     expect(JSON.stringify(snapshots)).not.toContain(fixturePassword);
+    const transcriptText = await readFile(
+      join(directory, "transcript.jsonl"),
+      "utf8",
+    );
+    const transcript: AuthTranscriptEvent[] = transcriptText
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(transcript[0]).toMatchObject({ type: "start", sequence: 1 });
+    expect(transcript.at(-1)).toMatchObject({
+      type: "result",
+      result: { status: "authenticated" },
+    });
+    expect(transcript.find((event) => event.type === "error")).toMatchObject({
+      phase: "agent",
+      code: "model_unavailable",
+      writeAttempted: true,
+      actionWriteAttempted: false,
+    });
+    for (const secret of [fixturePassword, "synthetic-key", shared.cdpUrl])
+      expect(transcriptText).not.toContain(secret);
     expect(await page.locator("body").innerText()).toContain(
       "Signed in as alice",
     );

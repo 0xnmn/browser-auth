@@ -88,6 +88,29 @@ Browser operations return flows that require interaction consumers. A CDP target
 
 Saving is separate from login: a successful login can return `save.status: "failed"`. Logout deletion is also independent. **`forgetCredentials: true` attempts deletion even if logout fails or its outcome is unknown**, unless cancelled before a browser action. Forgetting credentials does not revoke cookies or sessions. Cancellation after a browser write may yield `unknown`; inspect the session before retrying. Model-inferred authentication remains successful if only the later save-consent prompt is cancelled. Store writes already started are awaited to report their actual outcome.
 
+### Live diagnostic transcript
+
+Every flow exposes `transcript(): AsyncIterable<AuthTranscriptEvent>` alongside `updates()`, `respond()`, and `result`. No enable flag, callback, or screenshot option is needed. Subscribe immediately after `login()` to receive the initial `start` event, even if the flow fails immediately:
+
+```ts
+const flow = auth.login({ cdpUrl, url: "https://service.example" });
+const transcript = flow.transcript(); // Subscribes now, not on the first next().
+const recording = (async () => {
+  for await (const event of transcript) {
+    await writePrivateEvent(event); // Your private diagnostic sink; handle gaps.
+  }
+})();
+await renderFlow(flow); // Your existing updates()/respond() consumer runs concurrently.
+await recording;
+const result = await flow.result;
+```
+
+Events have a flow-local `sequence` and epoch-millisecond `timestamp`. The discriminated `type` includes `start`, `observation` (the agent input), `proposal` (schema-validated tool kind and arguments), `execution` (completed/rejected/failed controller processing), `interaction`, value-free `response`, sanitized `error`, and final `result`. Observation/proposal/execution events share a one-based model `step`. `execution.writeAttempted` concerns that proposal; error events distinguish cumulative `writeAttempted` from `actionWriteAttempted`, and preserve `deadline`, `caller_cancelled`, and `action_timeout` reasons. A completed execution is not proof of successful website authentication. Invalid proposals are not recorded verbatim. Raw provider messages/errors and hidden model reasoning are never included.
+
+This is a live stream, not a replay log: events emitted without subscribers are not retained, later subscribers do not receive history, and subscriptions after completion end immediately. Each subscriber independently buffers at most 64 events and 8 MiB of serialized event data. Slow consumers receive `gap` events with discarded sequence ranges instead of blocking authentication. Oversized individual events can also be discarded; diagnostic serialization failures produce a `recording_failed` gap. Streams drain and close on completion; breaking iteration or calling the iterator's `return()` unsubscribes. Events are isolated copies, not mutable controller state.
+
+**Transcripts contain sensitive website/account content and are separate from metadata-only OTLP tracing.** Screenshots are included automatically only when already captured under the browser observation policy: editable controls are masked, and screenshots are withheld once any credential value is known. No extra captures occur. Submitted responses contain field IDs, never values. Known reflected values are redacted structurally from observations, proposals, interactions, and results; a matching content string is replaced entirely to avoid partially filtered embedded JSON. This is not hostile-site confidentiality or general DLP: unknown/pre-existing browser content may be sensitive, and earlier events/images are not retroactively sanitized when a value becomes known. Protect storage, access, and retention; do not publish real-account transcripts.
+
 ## Credential storage and cross-domain login
 
 Only `InMemoryStore` is bundled. It stores plaintext in process memory and defensively copies records. It is not encrypted persistence and does not securely erase the JavaScript heap. A custom `CredentialStore` implements `list`, `get`, `save`, and `delete`. `list` returns metadata only; **`get` and `save` receive raw credentials**. The application owns encryption, tenant scoping, access controls, and retention. Hold your store reference if you need raw access; results never include credentials.
@@ -167,12 +190,15 @@ All operation options are accepted through `--input /private/options.json`: `cdp
 
 **Automation:** `browser-auth login --config ./auth.config.mjs --input /private/options.json --json` emits one `AuthSnapshot` JSON object per stdout line, including the final `done` result. Write one plain `AuthResponse` per stdin line, or `{"kind":"cancel"}`. Keep stdin open while the flow runs; EOF cancels it. Stale responses are rejected with a fixed stderr message; malformed/oversized input cancels rather than replaying a browser write. Input files and response lines are limited to 256 KiB, with individual response values limited to 8,192 characters. `--input -` is deliberately rejected: stdin is reserved for flow responses. Responses contain secrets—never capture stdin in logs. Stdout carries snapshots, not credentials or echoed responses, and stderr carries safe diagnostics.
 
+**Transcript recording:** Add `--transcript /private/new-session.jsonl` in either interactive or JSON mode. The CLI consumes the same flow stream concurrently and writes JSONL separately; stdout's snapshot protocol is unchanged. It creates a new file with exclusive `wx` access and mode `0600` before starting login, refuses to overwrite existing files, and flushes/closes before returning. Open failures prevent login. Write/flush/close failures or stream gaps print a safe stderr diagnostic and exit 1 while preserving the actual authentication result; they never cancel or retry login. Partial transcript files are retained. There are no transcript or screenshot configuration knobs in the SDK/login options.
+
 | SDK capability                     | CLI equivalent                                             |
 | ---------------------------------- | ---------------------------------------------------------- |
 | `login(options)`                   | `login`                                                    |
 | All target and operation options   | `--input` plus explicit flags                              |
 | `accounts.list`, `accounts.remove` | `accounts list`, `accounts remove`                         |
 | `updates()`, `respond()`, `result` | `--json` stdout snapshots / stdin responses / final `done` |
+| `transcript()`                     | `--transcript <new-file>` JSONL, separate from stdout      |
 | `AbortSignal`                      | Ctrl+C, JSON cancel, or stdin EOF                          |
 | Model, store, limits, tracing      | Shared `--config` module                                   |
 

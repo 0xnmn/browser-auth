@@ -1,4 +1,4 @@
-import { open } from "node:fs/promises";
+import { open, type FileHandle } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
@@ -37,6 +37,9 @@ export interface CliDependencies {
   loadConfig(path: string): Promise<AuthOptions>;
   loadInput(path: string): Promise<unknown>;
   createClient(options: AuthOptions): AuthClient;
+  openTranscript(
+    path: string,
+  ): Promise<Pick<FileHandle, "writeFile" | "sync" | "close">>;
 }
 
 const safe = (value: string): string =>
@@ -125,10 +128,11 @@ const defaults: CliDependencies = {
   loadConfig: defaultLoadConfig,
   loadInput,
   createClient: createAuth,
+  openTranscript: (path) => open(path, "wx", 0o600),
 };
 
 function usage(): string {
-  return "Usage: browser-auth login [website-url] [--config <module>] [--input <file>] [--cdp <endpoint>] [--target-id <id>] [--account-id <id>] [--label <label>] [--save yes|ask|never] [--forget] [--json]\n       browser-auth accounts <list|remove> [id] [--config <module>] [--service-origin <origin>] [--credential-origin <origin>] [--json]\nDefaults: OpenAI gpt-6-luna (OPENAI_API_KEY), CDP http://127.0.0.1:9222, save ask.";
+  return "Usage: browser-auth login [website-url] [--config <module>] [--input <file>] [--cdp <endpoint>] [--target-id <id>] [--account-id <id>] [--label <label>] [--save yes|ask|never] [--forget] [--json] [--transcript <file>]\n       browser-auth accounts <list|remove> [id] [--config <module>] [--service-origin <origin>] [--credential-origin <origin>] [--json]\nDefaults: OpenAI gpt-6-luna (OPENAI_API_KEY), CDP http://127.0.0.1:9222, save ask.";
 }
 type Parsed =
   | {
@@ -214,6 +218,7 @@ function parse(argv: readonly string[]): Parsed {
         "--account-id",
         "--label",
         "--save",
+        "--transcript",
       ].includes(name) ||
       !argv[index + 1]
     )
@@ -499,6 +504,30 @@ async function renderJson(
   }
 }
 
+/** Consume independently of rendering; disk failures never cancel or replay login. */
+async function recordTranscript(
+  flow: AuthFlow,
+  file: Awaited<ReturnType<CliDependencies["openTranscript"]>>,
+): Promise<boolean> {
+  let ok = true;
+  try {
+    for await (const event of flow.transcript()) {
+      if (event.type === "gap") ok = false;
+      await file.writeFile(`${JSON.stringify(event)}\n`);
+    }
+    await file.sync();
+  } catch {
+    ok = false;
+  } finally {
+    try {
+      await file.close();
+    } catch {
+      ok = false;
+    }
+  }
+  return ok;
+}
+
 export async function runCli(
   argv: readonly string[],
   overrides: Partial<CliDependencies> = {},
@@ -645,6 +674,21 @@ async function runCommand(
     const controller = new AbortController();
     operation.signal = controller.signal;
     const validated = validateOperationOptions(operation);
+    let transcriptFile:
+      Awaited<ReturnType<CliDependencies["openTranscript"]>> | undefined;
+    if (args.values.has("--transcript")) {
+      try {
+        transcriptFile = await deps.openTranscript(
+          args.values.get("--transcript")!,
+        );
+      } catch {
+        throw new AuthFailure(
+          "transcript_open_failed",
+          "Transcript file could not be created",
+        );
+      }
+    }
+    let recording: Promise<boolean> | undefined;
     const onOutputError = () => controller.abort();
     outputSignal.addEventListener("abort", onOutputError, { once: true });
     if (outputSignal.aborted) controller.abort();
@@ -653,6 +697,7 @@ async function runCommand(
     process.once("SIGINT", onInterrupt);
     try {
       const flow = client.login(validated);
+      if (transcriptFile) recording = recordTranscript(flow, transcriptFile);
       const result = await (args.json
         ? renderJson(flow, deps, controller)
         : renderInteractive(flow, deps, controller));
@@ -682,7 +727,8 @@ async function runCommand(
         deps.stderr.write("Signed in, but credentials could not be saved.\n");
       if (!args.json && "deletion" in result && result.deletion === "failed")
         deps.stderr.write("Credentials could not be deleted.\n");
-      return failed
+      const recorded = recording ? await recording : true;
+      return failed || !recorded
         ? 1
         : result.status === "authenticated" ||
             result.status === "signed-out" ||
@@ -692,6 +738,14 @@ async function runCommand(
             ? 130
             : 1;
     } finally {
+      if (recording) {
+        if (!(await recording))
+          deps.stderr.write(
+            "Transcript recording failed or lost events; the authentication result is unchanged.\n",
+          );
+      } else if (transcriptFile) {
+        await transcriptFile.close().catch(() => {});
+      }
       process.removeListener("SIGINT", onInterrupt);
       outputSignal.removeEventListener("abort", onOutputError);
     }
@@ -725,6 +779,8 @@ async function runCommand(
       account_remove_failed: "The saved account could not be removed",
       account_operation_failed: "The account operation could not finish",
       cli_failed: "browser-auth could not finish safely",
+      transcript_open_failed:
+        "Transcript file could not be created; use a new writable file",
     };
     if (args.json && !outputSignal.aborted) {
       try {

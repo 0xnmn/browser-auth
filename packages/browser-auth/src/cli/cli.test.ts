@@ -10,6 +10,7 @@ function flow(snapshots: AuthSnapshot[], respond = vi.fn()): AuthFlow {
   const result =
     last?.status === "done" ? last.result : { status: "cancelled" as const };
   return {
+    async *transcript() {},
     async *updates() {
       yield* snapshots;
     },
@@ -27,6 +28,7 @@ function controlledFlow() {
   });
   const respond = vi.fn(async () => {});
   const authFlow: AuthFlow = {
+    async *transcript() {},
     async *updates() {
       while (true) {
         if (queued.length === 0)

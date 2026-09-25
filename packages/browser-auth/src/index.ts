@@ -22,4 +22,11 @@ export type {
   AuthResponse,
   AuthResult,
   AuthError,
+  AuthTranscriptEvent,
+  AuthTranscriptObservation,
+  AuthTranscriptProposal,
+  AuthTranscriptValue,
+  AuthTranscriptResponse,
+  AuthTranscriptPhase,
+  AuthTranscriptFailure,
 } from "./protocol.js";
